@@ -184,6 +184,79 @@ func from_dictionary(data):
 Padrões mostrados: IA simples (range-based), regen, drops por probabilidade,
 serialização para save/load via dicionário.
 
+### Hitbox / Hurtbox — combate action em tempo real (Godot 4)
+
+Padrão fundamental para qualquer jogo com ataque melee/ranged:
+
+```gdscript
+# HitBox — área de ataque (espada, projétil, armadilha)
+class_name HitBox
+extends Area2D
+
+signal hit
+
+@export var damage := 1
+var id := -1  # ID única por ataque (evita multi-hit no mesmo swing)
+
+func _ready() -> void:
+    monitoring = false  # ativada só durante o ataque
+
+func refresh_id() -> void:
+    id = randi()  # chame antes de cada novo ataque
+```
+
+```gdscript
+# HurtBox — área que recebe dano (corpo do inimigo/player)
+class_name HurtBox
+extends Area2D
+
+signal hurt(damage: int)
+
+@export var health: Node  # referência ao componente de vida
+var last_hit_id := -1
+
+func _ready() -> void:
+    monitorable = false
+    area_entered.connect(_on_area_entered)
+
+func _on_area_entered(area: Area2D) -> void:
+    if not area is HitBox: return
+    var hitbox := area as HitBox
+    if hitbox.id == last_hit_id: return  # ignora mesmo ataque
+    last_hit_id = hitbox.id
+    if health:
+        health.take_damage(hitbox.damage)
+    hitbox.hit.emit()
+    hurt.emit(hitbox.damage)
+```
+
+**Collision layers (exemplo):**
+- Layer 1: Player hurtbox
+- Layer 2: Enemy hurtbox
+- Layer 3: Player hitbox (mask → layer 2)
+- Layer 4: Enemy hitbox (mask → layer 1)
+
+**Padrão de uso:**
+1. Espada/ataque: `HitBox` filho do player, `monitoring = false` por padrão.
+2. No frame de ataque (via `AnimationPlayer`), ative `hitbox.monitoring = true`
+   e chame `hitbox.refresh_id()`.
+3. No fim do ataque, `hitbox.monitoring = false`.
+4. Inimigos/player têm `HurtBox` sempre ativa; ao colidir com `HitBox`, aplica
+   dano + i-frames (desabilita hurtbox por ~0.5s).
+
+**I-frames (invincibilidade pós-dano):**
+```gdscript
+func take_damage(amount: int) -> void:
+    if _invulnerable: return
+    hp -= amount
+    _invulnerable = true
+    # Flash branco via shader (ver shaders-audio-juice.md)
+    $HurtBox/CollisionShape2D.set_deferred("disabled", true)
+    await get_tree().create_timer(0.5).timeout
+    $HurtBox/CollisionShape2D.disabled = false
+    _invulnerable = false
+```
+
 ---
 
 ## 3. Roguelike / roguelite (dungeon procedural)
