@@ -219,10 +219,122 @@ Godot, permitindo usar `@rpc` e `multiplayer_peer` como se fosse Godot puro.
 
 ---
 
-## 4. Escolha rápida
+## 4. Godot ENet nativo — multiplayer sem servidor externo
+
+Para jogos indie LAN/P2P ou com dedicated server simples. Usa a
+`MultiplayerAPI` embutida do Godot com `ENetMultiplayerPeer`.
+
+### Setup básico (host + join)
+
+```gdscript
+# NetworkManager — autoload
+extends Node
+
+const PORT := 7000
+const MAX_CLIENTS := 4
+
+signal player_connected(peer_id: int)
+signal player_disconnected(peer_id: int)
+
+var players: Dictionary = {}  # { peer_id: { name, ... } }
+
+func host_game(player_name: String) -> Error:
+    var peer := ENetMultiplayerPeer.new()
+    var err := peer.create_server(PORT, MAX_CLIENTS)
+    if err != OK: return err
+    multiplayer.multiplayer_peer = peer
+    multiplayer.peer_connected.connect(_on_peer_connected)
+    multiplayer.peer_disconnected.connect(_on_peer_disconnected)
+    _register_player(multiplayer.get_unique_id(), player_name)
+    return OK
+
+func join_game(address: String, player_name: String) -> Error:
+    var peer := ENetMultiplayerPeer.new()
+    var err := peer.create_client(address, PORT)
+    if err != OK: return err
+    multiplayer.multiplayer_peer = peer
+    multiplayer.connected_to_server.connect(func():
+        _register_player.rpc(multiplayer.get_unique_id(), player_name))
+    return OK
+
+func _on_peer_connected(id: int) -> void:
+    player_connected.emit(id)
+
+func _on_peer_disconnected(id: int) -> void:
+    players.erase(id)
+    player_disconnected.emit(id)
+
+@rpc("any_peer", "call_local", "reliable")
+func _register_player(id: int, player_name: String) -> void:
+    players[id] = { "name": player_name }
+```
+
+### Spawning sincronizado (MultiplayerSpawner)
+
+```gdscript
+# No nível/lobby, use MultiplayerSpawner (nó da cena):
+# - spawn_path: apontar para o container de players
+# - auto_spawn_list: cena do player
+
+func _on_peer_connected(id: int) -> void:
+    if multiplayer.is_server():
+        var player := PlayerScene.instantiate()
+        player.name = str(id)
+        $Players.add_child(player)
+```
+
+### RPC — chamadas remotas
+
+```gdscript
+# No script do player:
+extends CharacterBody2D
+
+func _physics_process(delta: float) -> void:
+    if not is_multiplayer_authority(): return
+    var input := Input.get_vector("left", "right", "up", "down")
+    velocity = input * SPEED
+    move_and_slide()
+
+# MultiplayerSynchronizer (nó filho) sincroniza position e velocity
+# automaticamente — sem RPC manual para movimento básico.
+
+# RPC para ações pontuais (ataque, chat, etc.)
+@rpc("any_peer", "call_local", "reliable")
+func take_damage(amount: int) -> void:
+    health -= amount
+    if health <= 0:
+        die()
+
+@rpc("any_peer", "call_local", "unreliable_ordered")
+func sync_animation(anim_name: String) -> void:
+    $AnimatedSprite2D.play(anim_name)
+```
+
+### Padrão de autoridade
+
+```
+Servidor (host, id=1):
+  - Spawna e remove players
+  - Valida ações (dano, coleta)
+  - É a "verdade" do estado do jogo
+
+Cliente (id=N):
+  - Envia inputs via RPC ao server
+  - Controla apenas seu player (is_multiplayer_authority())
+  - Recebe estado via MultiplayerSynchronizer
+```
+
+**Dica:** `MultiplayerSynchronizer` (nó) + `MultiplayerSpawner` (nó) são a forma
+moderna (Godot 4.x) de sincronizar — evitam RPCs manuais para posição/estado.
+Configure as propriedades a sincronizar no Inspector.
+
+---
+
+## 5. Escolha rápida
 
 | Preciso de… | Use |
 |---|---|
+| Multiplayer LAN/indie sem infra externa (Godot) | **ENet nativo** + MultiplayerSynchronizer |
 | Partida em tempo real num jogo web/Phaser | **Colyseus** (salas autoritativas) |
 | Contas, save na nuvem, amigos, ranking, matchmaking (Godot) | **Nakama** |
 | Ambos (sala de jogo + serviços sociais) | Nakama p/ serviços + match autoritativa |
@@ -232,3 +344,5 @@ Dicas finais:
 - Projete o estado para ser **pequeno e serializável** desde o início.
 - Nunca confie em dados do cliente para coisas que afetam outros jogadores.
 - Teste com latência artificial (simule 100–200ms) cedo.
+- `MultiplayerSynchronizer` para estado contínuo (posição); `@rpc` para eventos
+  pontuais (atacar, usar item, chat).

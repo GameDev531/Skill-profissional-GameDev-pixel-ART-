@@ -115,6 +115,175 @@ menos polido (cantos não tratados). Bom para começar; o 47 é o "profissional"
   retângulos de colisão a partir dos tiles sólidos, faça spawn das entidades da
   object layer.
 
+## 6. Geração procedural de dungeons
+
+Três abordagens progressivas para criar layouts em runtime:
+
+### 6a. BSP (Binary Space Partitioning) — salas + corredores
+
+Divide recursivamente o espaço até atingir tamanho mínimo, cria uma sala em cada
+folha, conecta salas irmãs por corredores.
+
+```gdscript
+class_name DungeonGenerator
+extends Node
+
+@export var grid_width: int = 50
+@export var grid_height: int = 50
+@export var min_room_size: int = 5
+@export var min_partition_size: int = 10
+@export var padding: int = 1
+
+var grid: Array = []   # 1=parede, 0=chão
+var rooms: Array[Rect2i] = []
+
+class BSPNode:
+    var x1: int; var y1: int; var x2: int; var y2: int
+    var left: BSPNode; var right: BSPNode
+    var room: Rect2i
+
+func generate() -> void:
+    grid.clear()
+    rooms.clear()
+    for y in grid_height:
+        var row := []
+        row.resize(grid_width)
+        row.fill(1)
+        grid.append(row)
+    var root := BSPNode.new()
+    root.x1 = 0; root.y1 = 0
+    root.x2 = grid_width - 1; root.y2 = grid_height - 1
+    _split(root)
+
+func _split(node: BSPNode) -> void:
+    var w := node.x2 - node.x1
+    var h := node.y2 - node.y1
+    if w <= min_partition_size or h <= min_partition_size:
+        _create_room(node)
+        return
+    var left_n := BSPNode.new()
+    var right_n := BSPNode.new()
+    if w > h:
+        var split := randi_range(node.x1 + min_partition_size, node.x2 - min_partition_size)
+        left_n.x1 = node.x1; left_n.y1 = node.y1; left_n.x2 = split; left_n.y2 = node.y2
+        right_n.x1 = split; right_n.y1 = node.y1; right_n.x2 = node.x2; right_n.y2 = node.y2
+    else:
+        var split := randi_range(node.y1 + min_partition_size, node.y2 - min_partition_size)
+        left_n.x1 = node.x1; left_n.y1 = node.y1; left_n.x2 = node.x2; left_n.y2 = split
+        right_n.x1 = node.x1; right_n.y1 = split; right_n.x2 = node.x2; right_n.y2 = node.y2
+    node.left = left_n; node.right = right_n
+    _split(left_n); _split(right_n)
+    _connect(_get_room_center(left_n), _get_room_center(right_n))
+
+func _create_room(node: BSPNode) -> void:
+    var max_w := node.x2 - node.x1 - padding * 2
+    var max_h := node.y2 - node.y1 - padding * 2
+    var rw := randi_range(min_room_size, max(min_room_size, max_w))
+    var rh := randi_range(min_room_size, max(min_room_size, max_h))
+    var rx := randi_range(node.x1 + padding, max(node.x1 + padding, node.x2 - padding - rw))
+    var ry := randi_range(node.y1 + padding, max(node.y1 + padding, node.y2 - padding - rh))
+    node.room = Rect2i(rx, ry, rw, rh)
+    rooms.append(node.room)
+    for y in range(ry, ry + rh):
+        for x in range(rx, rx + rw):
+            grid[y][x] = 0
+
+func _connect(a: Vector2i, b: Vector2i) -> void:
+    for x in range(min(a.x, b.x), max(a.x, b.x) + 1):
+        grid[a.y][x] = 0
+    for y in range(min(a.y, b.y), max(a.y, b.y) + 1):
+        grid[y][b.x] = 0
+
+func _get_room_center(node: BSPNode) -> Vector2i:
+    if node.room.size != Vector2i.ZERO:
+        return node.room.position + node.room.size / 2
+    return _get_room_center(node.left)
+
+func get_random_floor_pos() -> Vector2i:
+    var room: Rect2i = rooms[randi() % rooms.size()]
+    return Vector2i(
+        randi_range(room.position.x, room.end.x - 1),
+        randi_range(room.position.y, room.end.y - 1))
+```
+
+**Aplicar à TileMapLayer:**
+```gdscript
+func apply_to_tilemap(tilemap: TileMapLayer, wall_id: int, floor_id: int) -> void:
+    for y in grid_height:
+        for x in grid_width:
+            var atlas := Vector2i(floor_id, 0) if grid[y][x] == 0 else Vector2i(wall_id, 0)
+            tilemap.set_cell(Vector2i(x, y), 0, atlas)
+```
+
+### 6b. Random Walk (drunk walk)
+
+Mais orgânico — um "walker" caminha aleatoriamente cavando chão. Bom para caves.
+
+```gdscript
+func random_walk(steps: int, start: Vector2i) -> Array[Vector2i]:
+    var path: Array[Vector2i] = [start]
+    var directions := [Vector2i.UP, Vector2i.DOWN, Vector2i.LEFT, Vector2i.RIGHT]
+    var pos := start
+    for i in steps:
+        pos += directions[randi() % 4]
+        pos.x = clampi(pos.x, 1, grid_width - 2)
+        pos.y = clampi(pos.y, 1, grid_height - 2)
+        path.append(pos)
+    return path
+
+func generate_cave(walkers: int = 4, steps_per_walker: int = 200) -> void:
+    for y in grid_height:
+        for x in grid_width:
+            grid[y][x] = 1
+    var center := Vector2i(grid_width / 2, grid_height / 2)
+    for w in walkers:
+        for pos in random_walk(steps_per_walker, center):
+            grid[pos.y][pos.x] = 0
+```
+
+### 6c. Cellular Automata (suavização de caves)
+
+Pós-processo: gera ruído binário, depois aplica regras de vizinhança N vezes para
+suavizar.
+
+```gdscript
+func cellular_automata(fill_chance: float = 0.45, iterations: int = 4) -> void:
+    # Preenche aleatoriamente
+    for y in grid_height:
+        for x in grid_width:
+            if x == 0 or x == grid_width - 1 or y == 0 or y == grid_height - 1:
+                grid[y][x] = 1
+            else:
+                grid[y][x] = 1 if randf() < fill_chance else 0
+    # Suaviza
+    for i in iterations:
+        var new_grid := grid.duplicate(true)
+        for y in range(1, grid_height - 1):
+            for x in range(1, grid_width - 1):
+                var neighbors := _count_wall_neighbors(x, y)
+                new_grid[y][x] = 1 if neighbors >= 5 else 0
+        grid = new_grid
+
+func _count_wall_neighbors(cx: int, cy: int) -> int:
+    var count := 0
+    for dy in range(-1, 2):
+        for dx in range(-1, 2):
+            if dx == 0 and dy == 0: continue
+            if grid[cy + dy][cx + dx] == 1: count += 1
+    return count
+```
+
+### Quando usar cada
+
+| Algoritmo | Resultado | Bom para |
+|---|---|---|
+| BSP | Salas retangulares + corredores retos | Roguelikes clássicos, dungeons |
+| Random Walk | Caves orgânicas, formas irregulares | Minas, cavernas, ruínas |
+| Cellular Automata | Caves suaves com paredes arredondadas | Biomas naturais, cavernas |
+| Combinação | BSP para layout → cellular para bordas | Dungeons com caves dentro |
+
+---
+
 ## Checklist de mundo
 
 - [ ] Tileset com tile size fixo e colisão marcada.
@@ -123,3 +292,4 @@ menos polido (cantos não tratados). Bom para começar; o 47 é o "profissional"
 - [ ] Object layer com spawns lidos pela engine.
 - [ ] Greybox jogável validado antes da decoração final.
 - [ ] Câmera com limites do nível e parallax de fundo.
+- [ ] Geração procedural testada com seeds fixas para reprodutibilidade.
