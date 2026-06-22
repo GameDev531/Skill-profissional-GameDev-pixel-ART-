@@ -47,9 +47,142 @@ Sistemas essenciais:
 - **Progressão:** XP, level-up, stats, árvore/equipamento.
 - **Save/load:** serialize posição, inventário, flags de quest, stats.
 
-Zelda-likes se beneficiam de engines de gênero pronto (Solarus, em Lua, já traz
-herói, mapas, inimigos, HUD e itens). RPGs turn-based clássicos têm estrutura
-de "open RPG" reaproveitável: grid de mundo, party, batalha por turnos, lojas.
+### Sistema de combate turn-based — arquitetura real (Godot 4)
+
+Padrão extraído de sistemas profissionais (GDQuest Open RPG):
+
+**BattlerStats (Resource):** dados numéricos com modificadores empilháveis.
+```gdscript
+class_name BattlerStats extends Resource
+const MODIFIABLE_STATS = ["max_health","max_energy","attack","defense","speed","hit_chance","evasion"]
+signal health_depleted
+signal health_changed
+
+@export var base_max_health := 100
+@export var base_attack := 10
+@export var base_defense := 10
+@export var base_speed := 70
+@export var base_hit_chance := 100
+@export var base_evasion := 0
+
+var health := max_health:
+    set(value):
+        health = clampi(value, 0, max_health)
+        health_changed.emit()
+        if health == 0: health_depleted.emit()
+
+var _modifiers := {}    # { "attack": { id: value } }
+var _multipliers := {}  # multiplicadores somados (min 0.0)
+
+func add_modifier(stat_name: String, value: int) -> int:
+    # retorna id único para remover depois (ex.: ao desequipar)
+    ...
+
+func _recalculate_and_update(prop_name: String) -> void:
+    var value := get("base_" + prop_name) as float
+    var stat_multiplier := 1.0
+    for m in _multipliers[prop_name].values(): stat_multiplier += m
+    stat_multiplier = max(stat_multiplier, 0.0)
+    value *= stat_multiplier
+    for mod in _modifiers[prop_name].values(): value += mod
+    set(prop_name, roundf(max(value, 0.0)))
+```
+Conceito-chave: base_X + modifiers (aditivos de equipamento/buff) + multipliers
+(percentuais). IDs permitem remover modificadores individualmente (útil para
+equipar/desequipar e expirar buffs).
+
+**Battler (Node2D):** entidade combatente com estados e sinais.
+```gdscript
+class_name Battler extends Node2D
+signal turn_finished
+signal health_depleted
+signal hit_received(value: int)
+
+@export var stats: BattlerStats
+@export var actions: Array[BattlerAction]
+@export var ai_scene: PackedScene  # IA para inimigos
+var is_active := true
+var cached_action: BattlerAction = null
+
+func act() -> void:
+    stats.energy -= cached_action.energy_cost
+    await cached_action.execute()
+    cached_action = null
+    turn_finished.emit.call_deferred()
+
+func take_hit(hit: BattlerHit) -> void:
+    if hit.is_successful():
+        hit_received.emit(hit.damage)
+        stats.health -= hit.damage
+    else: hit_missed.emit()
+```
+
+**BattlerAction (Resource):** ações abstratas com escopo de alvo.
+```gdscript
+class_name BattlerAction extends Resource
+enum TargetScope { SELF, SINGLE, ALL }
+@export var target_scope := TargetScope.SINGLE
+@export var targets_enemies := true
+@export var energy_cost := 0
+
+func can_execute() -> bool:
+    return source.stats.energy >= energy_cost and not get_possible_targets().is_empty()
+
+func execute() -> void:  # override em cada ação concreta
+    pass
+```
+
+**Fluxo de batalha:** turnos por velocidade (`Battler.sort` por `stats.speed`),
+UI mostra ações → player escolhe ação+alvo → `cached_action` setado → `act()`
+chamado → animação → `turn_finished` → próximo battler. Inimigos usam `CombatAI`
+para selecionar ação automaticamente.
+
+### Inimigo RPG top-down — padrão real (SimpleRPG)
+
+```gdscript
+extends KinematicBody2D
+signal death
+var health := 100
+var attack_damage := 10
+var speed := 25
+var direction := Vector2.ZERO
+var player: Node
+
+func _process(delta):
+    health = min(health + 1 * delta, 100)  # regen
+    var relative := player.position - position
+    if relative.length() <= 16:
+        direction = Vector2.ZERO  # perto: parar e virar
+    elif relative.length() <= 100:
+        direction = relative.normalized()  # range: perseguir
+    elif randf() < 0.05:
+        direction = Vector2.ZERO  # longe: vagar/ficar parado
+    elif randf() < 0.1:
+        direction = Vector2.DOWN.rotated(randf() * TAU)
+
+func _physics_process(delta):
+    var collision = move_and_collide(direction * speed * delta)
+    if collision and collision.collider.name != "Player":
+        direction = direction.rotated(randf_range(PI/4, PI/2))
+
+func hit(damage):
+    health -= damage
+    if health <= 0:
+        emit_signal("death")
+        # drop item com 80% de chance
+        if randf() <= 0.8:
+            var potion = potion_scene.instance()
+            get_tree().root.call_deferred("add_child", potion)
+            potion.position = position
+        player.add_xp(25)
+
+func to_dictionary(): return {"position": [position.x, position.y], "health": health}
+func from_dictionary(data):
+    position = Vector2(data.position[0], data.position[1])
+    health = data.health
+```
+Padrões mostrados: IA simples (range-based), regen, drops por probabilidade,
+serialização para save/load via dicionário.
 
 ---
 
@@ -79,11 +212,85 @@ pixel maduros):
 Mecânicas-assinatura: campo de visão/fog of war, fome, identificação, andares
 crescentes em dificuldade, morte permanente.
 
-Geração procedural — técnicas:
-- **Salas + corredores:** sorteia retângulos não sobrepostos, liga com túneis.
-- **BSP:** subdivide o espaço recursivamente, cria uma sala por folha.
-- **Autômato celular:** ruído + suavização → cavernas orgânicas.
-- **Drunkard's walk:** caminhada aleatória escavando — cavernas conectadas.
+Geração procedural — técnicas e implementação real (Godot 4):
+
+**1. Salas + corredores (Brogue-style, do godot-roguelike-example):**
+```gdscript
+# Colocar salas aleatórias sem sobreposição num grid booleano
+var grid: Array[Array]  # true = ocupado
+func _generate_dungeon_rooms(width, height, params) -> Array[Room]:
+    var rooms: Array[Room] = []
+    var attempts := 0
+    while attempts < 500 and rooms.size() < 20:
+        var room_w := rng.randi_range(min_size, max_size)
+        var room_h := rng.randi_range(min_size, max_size)
+        var room_x := rng.randi_range(border, width - room_w - border)
+        var room_y := rng.randi_range(border, height - room_h - border)
+        # Verificar se sobrepõe (com 1-cell buffer)
+        var can_place := true
+        for x in range(room_x - 1, room_x + room_w + 1):
+            for y in range(room_y - 1, room_y + room_h + 1):
+                if grid[x][y]: can_place = false; break
+        if can_place:
+            for x in range(room_x, room_x + room_w):
+                for y in range(room_y, room_y + room_h): grid[x][y] = true
+            rooms.append(Room.new(room_x, room_y, room_w, room_h))
+        attempts += 1
+    return rooms
+```
+
+**2. Conexão via MST (Minimum Spanning Tree + Kruskal):**
+```gdscript
+# Garante que todas as salas estejam conectadas sem ciclos
+func _connect_all_rooms(map, rooms):
+    var connections: Array[RoomConnection] = []
+    for i in range(rooms.size()):
+        for j in range(i + 1, rooms.size()):
+            connections.append(RoomConnection.new(i, j, center_distance(rooms[i], rooms[j])))
+    connections.sort_custom(func(a,b): return a.distance < b.distance)
+    var ds := DisjointSet.new(rooms.size())
+    for c in connections:
+        if ds.find(c.room1_id) != ds.find(c.room2_id):
+            ds.union(c.room1_id, c.room2_id)
+            _connect_rooms(map, rooms[c.room1_id], rooms[c.room2_id])  # corredor L-shaped
+```
+
+**3. BSP (Binary Space Partition):**
+```gdscript
+func _generate_bsp_rooms(x, y, w, h, depth, min_room, min_split) -> Array[Room]:
+    if depth <= 0:
+        # Folha: criar sala com padding dentro do retângulo
+        return [Room.new(x+2, y+2, w-4, h-4)]
+    if randf() < 0.4 and h > min_split:  # split horizontal
+        var split := y + h/2
+        return _generate_bsp_rooms(x,y,w,split-y, depth-1, ...) + \
+               _generate_bsp_rooms(x,split,w,h-(split-y), depth-1, ...)
+    elif w > min_split:  # split vertical
+        var split := x + w/2
+        return _generate_bsp_rooms(x,y,split-x,h, depth-1, ...) + \
+               _generate_bsp_rooms(split,y,w-(split-x),h, depth-1, ...)
+    else:
+        return [Room.new(x+1, y+1, w-2, h-2)]
+```
+
+**4. Populamento (itens, monstros, obstáculos por tipo de sala):**
+- Cada sala recebe um `Room.Type` (EMPTY, LIBRARY, CRYPT, ALTAR...) com
+  `ObstacleConfig` específico (estantes, caixões, altares).
+- Monstros e itens distribuídos por `_place_monsters(count)` /
+  `_place_items(count)` com tries limitados (10x) por posição.
+- Itens empilháveis com quantidade; containers com itens dentro.
+- Escadas up/down conectam andares (`destination_level`).
+- Portas entre corredor↔sala (80% fechada, 20% aberta).
+
+**5. Autômato celular** (para cavernas orgânicas):
+```
+1. Gerar ruído (45-55% chance de ser parede por célula)
+2. Repetir 4-5x: se uma célula tem ≥5 vizinhos-parede nos 8 adjacentes → vira parede; senão → chão
+3. Resultado: cavernas orgânicas conectadas
+```
+
+**6. Drunkard's walk:** agente que anda aleatoriamente e escava. Quando % do
+mapa escavado atingir o alvo (30–40%), para. Garante conexão natural.
 
 ---
 

@@ -58,12 +58,57 @@ Como funciona (padrão do StateChart para Godot):
 - Seu código interage com **uma única classe** `StateChart`, com dois métodos
   principais: enviar evento e setar propriedade para guardas de expressão:
   ```gdscript
-  $StateChart.send_event("player_spotted")      # dispara transições
-  $StateChart.set_expression_property("hp", hp) # alimenta guardas
+  @onready var state_chart: StateChart = $StateChart
+
+  func _when_something_happened():
+      state_chart.send_event("player_spotted")      # dispara transições
+
+  func _on_hp_changed(new_hp: int):
+      state_chart.set_expression_property("hp", new_hp) # alimenta guardas
+  ```
+- **Transições diretas (code-triggered):** invoque `.take()` num nó Transition:
+  ```gdscript
+  var transition: Transition = $StateChart/MyState/MyTransition
+  transition.take()
   ```
 - Cada nó de estado emite sinais que você conecta: `state_entered`,
   `state_exited`, `state_processing(delta)`, `state_physics_processing(delta)`,
   `state_input`, `event_received`. Você coloca a lógica do estado nesses sinais.
+
+**Arquitetura do CompoundState** (estado composto com sub-estados):
+```gdscript
+class_name CompoundState extends StateChartState
+signal child_state_entered()
+signal child_state_exited()
+@export_node_path("StateChartState") var initial_state: NodePath
+var _active_state: StateChartState = null
+```
+- Na entrada, ativa o `initial_state` (ou restaura history state se aplicável).
+- Ao receber transição, resolve se o alvo é filho direto, descendente ou externo
+  e delega para cima/baixo conforme necessário.
+- Na saída, salva o estado ativo nos HistoryStates antes de desativar.
+
+**Guardas disponíveis:**
+- `ExpressionGuard` — avalia expressão Godot usando propriedades do chart.
+- `AllOfGuard` — AND lógico de sub-guardas.
+- `AnyOfGuard` — OR lógico de sub-guardas.
+- `NotGuard` — inverte a sub-guarda.
+- `StateIsActiveGuard` — verdadeiro se um estado específico está ativo.
+
+**Transições automáticas:** sem evento, "ficam em jogo" enquanto o estado está
+ativo e disparam assim que a guarda se torna verdadeira. Reagem a
+`set_expression_property` e mudanças de estado ativo automaticamente.
+
+**Exemplo de platformer com statechart (separação de responsabilidades):**
+```gdscript
+func _on_jump_enabled_state_physics_processing(_delta):
+    if Input.is_action_just_pressed("ui_accept"):
+        velocity.y = JUMP_VELOCITY
+        _state_chart.send_event("jump")
+```
+O princípio: **o statechart contém as regras de mudança de estado; o código
+contém a lógica executada em cada estado.** Nunca verifique `if state == X` no
+código — reaja aos sinais do statechart.
 
 Use para player com muitos modos, inimigos com fases, bosses multi-fase e menus.
 
@@ -90,22 +135,93 @@ Tipos de nó:
   - *Action:* executa (mover, atirar, tocar animação) e retorna status.
   - *Condition:* avalia estado (vejo o player? hp baixo?) → SUCCESS/FAILURE.
 
-Como integrar (padrão das libs de BT para Godot):
-- Monte a árvore como nós na cena e anexe a qualquer node; um `BTPlayer`/runner
-  faz o tick a cada frame.
-- **Blackboard:** memória compartilhada entre os nós (ex.: `target`,
-  `last_seen_pos`). Use *scopes* para evitar conflito de nomes entre agentes.
-- **Tasks customizadas:** estenda as classes-base (`BTAction`, `BTCondition`,
-  `BTDecorator`, `BTComposite`) e implemente o `tick()`:
+### Beehave (Godot 4) — implementação real
 
-```gdscript
-extends BTAction          # task customizada
-func _tick(delta) -> Status:
-    var target = blackboard.get_var("target")
-    if target == null: return FAILURE
-    agent.move_towards(target.global_position, delta)
-    return RUNNING if not agent.reached(target) else SUCCESS
+**Montagem:** adicione um `BeehaveTree` ao CharacterBody2D do inimigo. Abaixo,
+monte a árvore com composites e leaves como nós filhos na cena.
+
+**Estrutura de árvore típica:**
 ```
+BeehaveTree
+└── SelectorComposite (tenta atacar, senão patrulha)
+    ├── SequenceComposite (atacar)
+    │   ├── IsPlayerVisible (ConditionLeaf)
+    │   ├── ChasePlayer (ActionLeaf)
+    │   └── AttackPlayer (ActionLeaf)
+    └── SequenceComposite (patrulhar)
+        ├── MoveToPatrolPoint (ActionLeaf)
+        └── WaitAtPatrolPoint (ActionLeaf)
+```
+
+**ConditionLeaf — verificar se o player está visível:**
+```gdscript
+class_name IsPlayerVisible extends ConditionLeaf
+@export var detection_range := 200.0
+@export var vision_cone_angle := 45.0
+
+func tick(actor: Node, blackboard: Blackboard) -> int:
+    var player = get_tree().get_first_node_in_group("player")
+    if not player: return FAILURE
+    var to_player = player.global_position - actor.global_position
+    if to_player.length() > detection_range: return FAILURE
+    var forward = Vector2.RIGHT.rotated(actor.rotation)
+    if abs(forward.angle_to(to_player.normalized())) > deg_to_rad(vision_cone_angle):
+        return FAILURE
+    blackboard.set_value("player_position", player.global_position)
+    return SUCCESS
+```
+
+**ActionLeaf — perseguir o player:**
+```gdscript
+class_name ChasePlayer extends ActionLeaf
+@export var move_speed := 100.0
+@export var attack_range := 30.0
+
+func tick(actor: Node, blackboard: Blackboard) -> int:
+    var target_pos = blackboard.get_value("player_position")
+    if not target_pos: return FAILURE
+    var dir = (target_pos - actor.global_position).normalized()
+    actor.global_position += dir * move_speed * get_physics_process_delta_time()
+    if actor.global_position.distance_to(target_pos) <= attack_range:
+        return SUCCESS
+    return RUNNING
+```
+
+**ActionLeaf — patrulhar com espera:**
+```gdscript
+class_name WaitAtPatrolPoint extends ActionLeaf
+@export var wait_time := 2.0
+var current := 0.0
+
+func tick(actor: Node, blackboard: Blackboard) -> int:
+    if blackboard.get_value("patrol_point_reached", false):
+        blackboard.set_value("patrol_point_reached", false)
+        current = 0.0
+    current += get_physics_process_delta_time()
+    return SUCCESS if current >= wait_time else RUNNING
+```
+
+**SelectorComposite (código real do motor Beehave):**
+Itera filhos em ordem; no primeiro SUCCESS ou RUNNING, para e retorna esse
+status. Se o filho anterior estava RUNNING e outro tem sucesso antes, o running
+é interrompido (`interrupt()`). Se todos falharem, retorna FAILURE.
+
+**Blackboard:** cada BeehaveTree tem um Blackboard (ou compartilhado). Use
+`blackboard.set_value(key, value)` / `get_value(key)` para compartilhar dados
+entre nós (posição do alvo, flags, cooldowns).
+
+**Decorators disponíveis:** `InverterDecorator`, `RepeaterDecorator`,
+`LimiterDecorator` (max N execuções), `CooldownDecorator` (tempo entre ticks),
+`DelayDecorator` (espera antes de rodar), `TimeLimiterDecorator`,
+`UntilFailDecorator`, `AlwaysSucceedDecorator`, `AlwaysFailDecorator`.
+
+**Composites extras:** `SequenceStarComposite` (retoma do último running/failure),
+`SelectorReactiveComposite`/`SequenceReactiveComposite` (reavalia condições
+anteriores a cada tick), `RandomSelector`/`RandomSequence` (ordem aleatória),
+`SimpleParallelComposite` (roda ação principal + background em paralelo).
+
+**Lifecycle de cada nó:** `before_run` → N×`tick` → `after_run` (ou `interrupt`
+se cortado pelo pai).
 
 **BT + HSM juntos:** o padrão avançado usa um estado da máquina hierárquica que
 **executa um behavior tree** (um `BTState`). Assim você combina estados de alto

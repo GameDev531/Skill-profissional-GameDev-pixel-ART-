@@ -74,7 +74,7 @@ Efeitos 2D comuns e quando usar:
 | **Screen distortion / shockwave** | Onda de choque em explosões |
 | **2D lighting / normal maps** | Luz dinâmica, dia/noite, tochas |
 
-Exemplo — palette swap / hit flash (Godot, canvas_item shader):
+### Shader 1 — Palette swap / Hit flash
 ```glsl
 shader_type canvas_item;
 uniform float flash : hint_range(0,1) = 0.0;
@@ -85,6 +85,81 @@ void fragment() {
 }
 ```
 Anime o uniform `flash` 1→0 com um tween ao tomar dano.
+
+### Shader 2 — Outline (pixel-perfect, 4-sample)
+```glsl
+shader_type canvas_item;
+uniform vec4 line_color : source_color = vec4(1);
+uniform float line_thickness : hint_range(0, 10) = 1.0;
+
+void fragment() {
+    vec2 size = TEXTURE_PIXEL_SIZE * line_thickness;
+    float outline = texture(TEXTURE, UV + vec2(-size.x, 0)).a;
+    outline += texture(TEXTURE, UV + vec2(0, size.y)).a;
+    outline += texture(TEXTURE, UV + vec2(size.x, 0)).a;
+    outline += texture(TEXTURE, UV + vec2(0, -size.y)).a;
+    outline = min(outline, 1.0);
+    vec4 color = texture(TEXTURE, UV);
+    COLOR = mix(color, line_color, outline - color.a);
+}
+```
+Amostra 4 vizinhos cardinais; `line_thickness` controla largura em pixels.
+Para outline 8-way (diagonais), adicione 4 amostras extras.
+
+### Shader 3 — Dissolve (noise-based)
+```glsl
+shader_type canvas_item;
+uniform sampler2D noiseTexture : repeat_enable;
+uniform float noiseTiling = 2.0;
+uniform float dissolveAmount : hint_range(0, 1);
+uniform float edgeThickness = 0.01;
+uniform vec4 edgeColor : source_color;
+
+void fragment() {
+    vec4 originalTexture = texture(TEXTURE, UV);
+    vec4 dissolveNoise = texture(noiseTexture, UV * noiseTiling);
+    float remappedDissolve = dissolveAmount * (1.01 + edgeThickness) - edgeThickness;
+    vec4 step1 = step(remappedDissolve, dissolveNoise);
+    vec4 step2 = step(remappedDissolve + edgeThickness, dissolveNoise);
+    vec4 edgeArea = step1 - step2;
+    edgeArea.a = originalTexture.a;
+    originalTexture.a *= step1.r;
+    vec4 coloredEdge = edgeArea * edgeColor;
+    COLOR = mix(originalTexture, coloredEdge, edgeArea.r);
+}
+```
+Anime `dissolveAmount` 0→1 para "queimar" o sprite. `edgeColor` define a cor da
+borda brilhante. Passe uma noise texture (SimplexNoise/FastNoiseLite).
+
+### Shader 4 — Grass sway / wind vertex
+```glsl
+shader_type canvas_item;
+uniform float frequency = 1.0;
+uniform float amplitude = 1.0;
+
+void vertex() {
+    VERTEX.x += (-VERTEX.y * sin(TIME * frequency) * amplitude);
+}
+```
+Simula vento: desloca X proporcional à altura Y do vértice. Coloque o sprite
+com pivot embaixo para a base ficar firme. Funciona para grama, árvores, bandeiras.
+
+### Shader 5 — Circular transition / fade-out
+```glsl
+shader_type canvas_item;
+uniform float fadeAmount : hint_range(0, 1) = 1.0;
+uniform float fadeSmoothing : hint_range(0, 1) = 0.5;
+uniform vec4 fadeColor : source_color;
+uniform vec2 offset = vec2(0.5, 0.5);
+
+void fragment() {
+    float dist = distance(UV, offset);
+    float circle = smoothstep(fadeAmount, fadeAmount + fadeSmoothing, dist);
+    vec4 tex = texture(TEXTURE, UV);
+    COLOR = mix(tex, fadeColor, circle);
+}
+```
+Ótimo para transições estilo "buraco negro" (wipe circular). Anime `fadeAmount`.
 
 Organização típica de uma biblioteca de shaders: pasta `Shaders/` com o `.gdshader`
 e `Demos/` com cenas mostrando cada efeito aplicado — estude o demo e copie o

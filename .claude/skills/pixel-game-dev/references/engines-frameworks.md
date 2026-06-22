@@ -149,10 +149,56 @@ function update() {
 }
 ```
 
+**Padrão de jogo completo (runner/dungeon):**
+```js
+class Game extends Phaser.Scene {
+  preload() {
+    this.registry.set("score", "0");
+    this.load.audio("jump", "assets/jump.mp3");
+    this.load.audio("coin", "assets/coin.mp3");
+    this.load.audio("death", "assets/death.mp3");
+    this.load.spritesheet("hero", "hero.png", { frameWidth: 16, frameHeight: 16 });
+  }
+  create() {
+    this.width = this.sys.game.config.width;
+    this.height = this.sys.game.config.height;
+    // Player com física
+    this.player = this.physics.add.sprite(32, this.height - 32, "hero");
+    this.player.setCollideWorldBounds(true);
+    // Input: espaço e clique
+    this.input.on("pointerdown", () => this.jump());
+    this.input.keyboard.on("keydown-SPACE", () => this.jump());
+    // Colisões com callbacks
+    this.physics.add.collider(this.player, this.obstacles, () => this.hitObstacle());
+    this.physics.add.overlap(this.player, this.coins, (p, c) => this.hitCoin(c));
+    // Câmera
+    this.cameras.main.startFollow(this.player);
+  }
+  jump() {
+    if (this.player.body.blocked.down) {
+      this.player.setVelocityY(-300);
+      this.sound.play("jump");
+    }
+  }
+  hitCoin(coin) {
+    this.sound.play("coin");
+    coin.destroy();
+    this.registry.set("score", parseInt(this.registry.get("score")) + 10);
+  }
+  hitObstacle() {
+    this.sound.play("death");
+    this.cameras.main.shake(200, 0.01);
+    this.scene.start("GameOver");
+  }
+}
+```
+
 > Padrões a dominar em Phaser: organizar o jogo em **Scenes** (Boot, Preload,
 > Menu, Game, UI) trocáveis; física Arcade (gravidade, colliders, overlaps);
-> `tilemapTiledJSON` para mapas; spritesheets + `anims.create`. Para multiplayer
-> em tempo real, integre com salas autoritativas (ver `multiplayer.md`).
+> `tilemapTiledJSON` para mapas; spritesheets + `anims.create`; `registry` para
+> estado global entre cenas; `cameras.main.shake/fade/startFollow` para juice.
+> Para multiplayer em tempo real, integre com salas autoritativas (ver
+> `multiplayer.md`).
 
 ---
 
