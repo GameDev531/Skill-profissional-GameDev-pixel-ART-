@@ -856,6 +856,158 @@ func use_item(slot_index: int, stats) -> bool:
 
 ---
 
+## 8. Loot table / sistema de drops (Resource-based, Godot 4)
+
+Sistema de tabelas de loot com pesos (probabilidade cumulativa), raridades,
+e condições. Essencial para RPGs, roguelikes, e qualquer jogo com drops aleatórios.
+
+```gdscript
+# LootEntry — um item possível na tabela (Resource)
+class_name LootEntry
+extends Resource
+
+@export var item: ItemData
+@export var weight: float = 1.0
+@export var min_quantity: int = 1
+@export var max_quantity: int = 1
+@export var min_level: int = 0
+@export var max_level: int = 999
+
+func get_quantity() -> int:
+    return randi_range(min_quantity, max_quantity)
+
+func is_available(player_level: int) -> bool:
+    return player_level >= min_level and player_level <= max_level
+```
+
+```gdscript
+# LootTable — tabela de drop com rolagem por peso cumulativo
+class_name LootTable
+extends Resource
+
+@export var entries: Array[LootEntry] = []
+@export var guaranteed_drops: Array[LootEntry] = []
+@export var roll_count: int = 1
+@export var nothing_weight: float = 0.0
+
+## Rola a tabela e retorna array de {item, quantity}
+func roll(player_level: int = 0) -> Array[Dictionary]:
+    var results: Array[Dictionary] = []
+
+    # Drops garantidos (sempre caem)
+    for entry in guaranteed_drops:
+        if entry.is_available(player_level):
+            results.append({"item": entry.item, "quantity": entry.get_quantity()})
+
+    # Rolagens aleatórias (peso cumulativo)
+    for i in range(roll_count):
+        var drop := _roll_once(player_level)
+        if drop:
+            results.append(drop)
+    return results
+
+func _roll_once(player_level: int) -> Dictionary:
+    var available: Array[LootEntry] = []
+    for entry in entries:
+        if entry.is_available(player_level):
+            available.append(entry)
+    if available.is_empty():
+        return {}
+
+    # Calcular peso total (incluindo "nada")
+    var total_weight := nothing_weight
+    for entry in available:
+        total_weight += entry.weight
+
+    # Rolar valor e encontrar pela soma cumulativa
+    var roll := randf() * total_weight
+    var cumulative := nothing_weight
+    for entry in available:
+        cumulative += entry.weight
+        if roll <= cumulative:
+            return {"item": entry.item, "quantity": entry.get_quantity()}
+    return {}  # nothing_weight ganhou
+```
+
+```gdscript
+# Uso no inimigo/baú ao morrer/abrir:
+@export var loot_table: LootTable
+
+func die() -> void:
+    var drops := loot_table.roll(player.level)
+    for drop in drops:
+        _spawn_pickup(drop.item, drop.quantity, global_position)
+
+func _spawn_pickup(item: ItemData, qty: int, pos: Vector2) -> void:
+    var pickup := PickupScene.instantiate()
+    pickup.item = item
+    pickup.quantity = qty
+    pickup.global_position = pos
+    # Ejetar com velocidade aleatória (efeito "explodir loot")
+    pickup.velocity = Vector2(randf_range(-80, 80), randf_range(-120, -60))
+    get_tree().current_scene.add_child(pickup)
+```
+
+**Sistema de raridade com cores e peso automático:**
+```gdscript
+enum Rarity { COMMON, UNCOMMON, RARE, EPIC, LEGENDARY }
+
+const RARITY_WEIGHTS := {
+    Rarity.COMMON: 60.0,
+    Rarity.UNCOMMON: 25.0,
+    Rarity.RARE: 10.0,
+    Rarity.EPIC: 4.0,
+    Rarity.LEGENDARY: 1.0,
+}
+const RARITY_COLORS := {
+    Rarity.COMMON: Color.WHITE,
+    Rarity.UNCOMMON: Color.GREEN,
+    Rarity.RARE: Color.CORNFLOWER_BLUE,
+    Rarity.EPIC: Color.MEDIUM_PURPLE,
+    Rarity.LEGENDARY: Color.GOLD,
+}
+```
+
+**Padrões avançados:**
+- **Pity system:** após N rolls sem rare+, aumente o peso de raros
+  (`nothing_weight -= X` a cada falha; reset ao dropar).
+- **Tabelas aninhadas:** um `LootEntry` pode referenciar outra `LootTable`
+  (ex.: "mesa de armas" dentro da "mesa do boss").
+- **Luck stat:** multiplique pesos de itens raros por `1 + luck * 0.01`.
+- **Drop exclusivo:** se `roll_count = 1`, apenas um item (bom para baús).
+- **Tabela contextual:** diferentes `LootTable` por bioma/zona/tipo de inimigo.
+
+**Loot pickup com magnetismo (atração ao player):**
+```gdscript
+class_name LootPickup
+extends Area2D
+
+@export var item: ItemData
+@export var quantity: int = 1
+var velocity := Vector2.ZERO
+var attracted := false
+const ATTRACT_SPEED := 300.0
+const FRICTION := 0.9
+
+func _physics_process(delta: float) -> void:
+    if attracted:
+        var dir := (player.global_position - global_position).normalized()
+        velocity = dir * ATTRACT_SPEED
+    else:
+        velocity *= FRICTION  # desacelera após ejeção inicial
+    global_position += velocity * delta
+
+func _on_body_entered(body: Node2D) -> void:
+    if body.has_method("collect_item"):
+        body.collect_item(item, quantity)
+        queue_free()
+
+func _on_attract_area_entered(body: Node2D) -> void:
+    attracted = true
+```
+
+---
+
 ## Como escolher e escopar
 
 - **Game jam / primeiro jogo:** plataforma de uma tela ou arena top-down. Pouca

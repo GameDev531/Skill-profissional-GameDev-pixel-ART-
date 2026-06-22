@@ -104,6 +104,83 @@ func hit_stop(duration: float = 0.05) -> void:
 Combine: `hit_stop(0.04)` + `camera_shake(2.0, 0.3)` + hit flash = impacto
 poderoso. O quarto param `true` no Timer ignora time_scale (processa em real time).
 
+### Damage numbers / floating text popup
+
+Números de dano que sobem e somem — feedback visual essencial para qualquer jogo
+com combate. Padrão: Label + Tween (posição sobe + alfa desaparece).
+
+```gdscript
+# DamageNumber — instancie na posição do hit
+class_name DamageNumber
+extends Label
+
+@export var float_speed := 50.0
+@export var duration := 0.8
+@export var spread := 20.0
+
+func _ready() -> void:
+    pivot_offset = size / 2
+    var tween := create_tween().set_parallel(true)
+    # Subir com desaceleração
+    tween.tween_property(self, "position:y", position.y - float_speed, duration)\
+        .set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_CUBIC)
+    # Espalhar levemente na horizontal (variação por instância)
+    tween.tween_property(self, "position:x",
+        position.x + randf_range(-spread, spread), duration)\
+        .set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_CUBIC)
+    # Fade out na segunda metade
+    tween.tween_property(self, "modulate:a", 0.0, duration * 0.5)\
+        .set_delay(duration * 0.5)
+    # Escala: pop-in no início
+    scale = Vector2(0.5, 0.5)
+    tween.tween_property(self, "scale", Vector2.ONE, 0.15)\
+        .set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_BACK)
+    # Auto-destruir
+    tween.chain().tween_callback(queue_free)
+
+static func spawn(parent: Node, global_pos: Vector2, amount: int,
+        color: Color = Color.WHITE) -> DamageNumber:
+    var num := DamageNumber.new()
+    num.text = str(amount)
+    num.add_theme_color_override("font_color", color)
+    num.global_position = global_pos
+    num.z_index = 100
+    parent.add_child(num)
+    return num
+```
+
+**Uso no sistema de combate:**
+```gdscript
+func take_damage(amount: int) -> void:
+    hp -= amount
+    # Cor por contexto: vermelho=dano, verde=cura, amarelo=crítico
+    var color := Color.RED if amount > 0 else Color.GREEN
+    if is_critical:
+        color = Color.YELLOW
+        amount = int(amount * 1.5)
+    DamageNumber.spawn(get_tree().current_scene, global_position + Vector2(0, -16),
+        amount, color)
+```
+
+**Variantes comuns:**
+- **Crítico:** fonte maior + cor amarela + "!" no final.
+- **Cura:** número verde subindo; ou "+" prefixo.
+- **Miss/esquiva:** texto "MISS" cinza, menor, sem spread.
+- **XP/gold:** ícone + número subindo ao coletar.
+
+**Alternativa com preload de cena (.tscn):**
+Se preferir controlar a fonte/sombra no editor, crie uma cena `DamageNumber.tscn`
+com Label configurado (fonte outline, sombra, tamanho) e instancie:
+```gdscript
+const DamageNumberScene := preload("res://vfx/damage_number.tscn")
+
+func show_damage(pos: Vector2, amount: int) -> void:
+    var instance := DamageNumberScene.instantiate()
+    instance.global_position = pos
+    instance.text = str(amount)
+    get_tree().current_scene.add_child(instance)
+```
+
 ---
 
 ## 3. Shaders 2D essenciais para pixel
@@ -317,9 +394,80 @@ e `Demos/` com cenas mostrando cada efeito aplicado — estude o demo e copie o
 shader. Para efeitos de tela inteira (CRT, vinheta, color grading), aplique como
 pós-processamento num `CanvasLayer`/viewport.
 
-Partículas e efeitos de câmera (zoom punch, flash de tela, vinheta de dano)
-complementam shaders: use o sistema de partículas 2D da engine para poeira,
-faíscas, fumaça e fragmentos, disparados nos mesmos eventos do feedback.
+### GPUParticles2D — partículas pixel-art (Godot 4)
+
+Configuração de partículas que mantêm a estética pixel (sem suavização).
+
+**Setup base:** adicione `GPUParticles2D` como filho do emissor. No Inspector:
+- `Amount`: número de partículas simultâneas.
+- `One Shot`: ON para burst (explosão), OFF para contínuo (fumaça, poeira).
+- `Lifetime`: duração de cada partícula em segundos.
+- `Explosiveness`: 1.0 = todas emitidas de uma vez (burst), 0.0 = distribuídas no lifetime.
+- `Process Material`: crie `ParticleProcessMaterial`.
+
+**ParticleProcessMaterial — configurações por efeito:**
+
+```gdscript
+# Explosão de impacto (one-shot, radial)
+func create_hit_particles() -> GPUParticles2D:
+    var particles := GPUParticles2D.new()
+    particles.emitting = false
+    particles.one_shot = true
+    particles.amount = 8
+    particles.lifetime = 0.4
+    particles.explosiveness = 1.0
+
+    var mat := ParticleProcessMaterial.new()
+    mat.direction = Vector3(0, -1, 0)
+    mat.spread = 180.0  # radial (360° / 2)
+    mat.initial_velocity_min = 40.0
+    mat.initial_velocity_max = 80.0
+    mat.gravity = Vector3(0, 200, 0)  # cai após explodir
+    mat.damping_min = 20.0  # desacelera
+    mat.scale_min = 1.0
+    mat.scale_max = 2.0
+    # Fade out via color ramp
+    var gradient := Gradient.new()
+    gradient.set_color(0, Color.WHITE)
+    gradient.set_color(1, Color(1, 1, 1, 0))  # fade alpha
+    var grad_tex := GradientTexture1D.new()
+    grad_tex.gradient = gradient
+    mat.color_ramp = grad_tex
+
+    particles.process_material = mat
+    # Textura: sprite pequeno (2×2 ou 4×4 px branco)
+    particles.texture = preload("res://assets/vfx/particle_dot.png")
+    return particles
+```
+
+**Presets comuns (valores de ParticleProcessMaterial):**
+
+| Efeito | Amount | Lifetime | Spread | Velocity | Gravity | Extra |
+|--------|--------|----------|--------|----------|---------|-------|
+| **Hit spark** | 6–10 | 0.3s | 180° | 50–100 | (0, 150) | one_shot, scale↓ |
+| **Dust (pouso)** | 4–6 | 0.4s | 45° | 20–40 | (0, -20) | direction: sides |
+| **Blood/fragments** | 8–12 | 0.5s | 60° | 60–120 | (0, 300) | scale 1–3px |
+| **Smoke trail** | contínuo | 0.8s | 15° | 10–20 | (0, -30) | fade alpha |
+| **Collect sparkle** | 12 | 0.6s | 180° | 30–60 | (0, -50) | scale_curve↑↓ |
+
+**Pixel-art tips:**
+- Use textura de 1×1 a 4×4 pixels brancos — tinte via `color` ou `color_ramp`.
+- Desabilite `Fixed FPS` ou set para a mesma taxa do jogo (manter sincronia).
+- Nunca use textura com filtro linear em partículas pixel — confirme `Nearest`.
+- Para partículas animadas (chamas), use `SpriteFrames` num sub-viewport ou
+  múltiplas texturas no material (via `anim_speed`).
+
+**Emitir por código (one-shot no hit):**
+```gdscript
+func _on_hit(pos: Vector2) -> void:
+    var particles := hit_particles_scene.instantiate()
+    particles.global_position = pos
+    get_tree().current_scene.add_child(particles)
+    particles.emitting = true
+    # Auto-destruir após completar
+    await get_tree().create_timer(particles.lifetime + 0.1).timeout
+    particles.queue_free()
+```
 
 ---
 

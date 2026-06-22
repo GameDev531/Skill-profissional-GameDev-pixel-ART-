@@ -159,6 +159,99 @@ func delete_save() -> void:
   `get_save_data() -> Dictionary` e itere com `get_tree().get_nodes_in_group("saveable")`.
 - Teste o round-trip (salvar→carregar→comparar) num teste automatizado.
 
+### Save/Load com Resources (abordagem nativa Godot 4)
+
+Resources são serializáveis nativamente — o Godot salva/carrega toda a árvore de
+propriedades automaticamente (inclusive Resources aninhados). Mais robusto que JSON
+para dados complexos (Vector2, Color, Arrays tipados, sub-Resources).
+
+```gdscript
+# SaveGame — Resource que contém TODO o estado do save
+class_name SaveGame
+extends Resource
+
+@export var player_stats: PlayerStats
+@export var inventory: Inventory
+@export var quest_data: Dictionary = {}
+@export var world_state: Dictionary = {}
+@export var play_time: float = 0.0
+@export var save_date: String = ""
+@export var current_scene: String = ""
+@export var player_position: Vector2 = Vector2.ZERO
+
+const SAVE_DIR := "user://saves/"
+const SAVE_EXT := ".tres"
+
+static func save_exists(slot: int) -> bool:
+    return ResourceLoader.exists(_get_path(slot))
+
+static func save_to_slot(data: SaveGame, slot: int) -> Error:
+    data.save_date = Time.get_datetime_string_from_system()
+    DirAccess.make_dir_recursive_absolute(SAVE_DIR)
+    return ResourceSaver.save(data, _get_path(slot))
+
+static func load_from_slot(slot: int) -> SaveGame:
+    if not save_exists(slot):
+        return null
+    return load(_get_path(slot)) as SaveGame
+
+static func delete_slot(slot: int) -> void:
+    if save_exists(slot):
+        DirAccess.remove_absolute(_get_path(slot))
+
+static func _get_path(slot: int) -> String:
+    return SAVE_DIR + "save_%d%s" % [slot, SAVE_EXT]
+```
+
+```gdscript
+# Uso no GameManager (autoload):
+func save(slot: int) -> void:
+    var save_data := SaveGame.new()
+    save_data.player_stats = player.stats.duplicate()
+    save_data.inventory = player.inventory.duplicate()
+    save_data.quest_data = QuestManager.serialize()
+    save_data.current_scene = get_tree().current_scene.scene_file_path
+    save_data.player_position = player.global_position
+    save_data.play_time = _total_play_time
+    # Coletar estado do mundo (baús abertos, NPCs derrotados, etc.)
+    save_data.world_state = _collect_world_state()
+    SaveGame.save_to_slot(save_data, slot)
+
+func load_save(slot: int) -> void:
+    var save_data := SaveGame.load_from_slot(slot)
+    if not save_data: return
+    await SceneTransition.change_scene(save_data.current_scene)
+    player.stats = save_data.player_stats
+    player.inventory = save_data.inventory
+    player.global_position = save_data.player_position
+    QuestManager.deserialize(save_data.quest_data)
+    _apply_world_state(save_data.world_state)
+    _total_play_time = save_data.play_time
+
+func _collect_world_state() -> Dictionary:
+    var state := {}
+    for node in get_tree().get_nodes_in_group("saveable"):
+        state[node.get_path()] = node.get_save_data()
+    return state
+
+func _apply_world_state(state: Dictionary) -> void:
+    for node in get_tree().get_nodes_in_group("saveable"):
+        var path := String(node.get_path())
+        if state.has(path):
+            node.load_save_data(state[path])
+```
+
+**Resource vs JSON — quando usar cada:**
+| Resource (.tres) | JSON |
+|---|---|
+| Godot-only, serializa tudo nativo (Vector2, Color, sub-Resources) | Cross-engine, legível por humanos, editável manualmente |
+| Seguro apenas se controlado (Resources podem conter scripts) | Sem risco de execução de código |
+| Ideal para stats, inventário, configurações complexas | Ideal para dados web, leaderboards, configs simples |
+
+**Segurança:** nunca carregue `.tres` de fontes externas sem validação — Resources
+podem referenciar scripts. Para multiplayer/UGC, use JSON ou
+`SafeResourceLoader` (verifica o conteúdo antes de carregar).
+
 ---
 
 ## 4b. Transição de cena (autoload)

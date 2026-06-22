@@ -382,3 +382,241 @@ await $DialogueBox.dialogue_finished
   pixel crisp.
 - **Integração com Ink/Yarn:** substitua o array de dicts por um parser que lê
   linhas do Ink runner ou Yarn dialogue runner e popula `_lines` dinamicamente.
+
+---
+
+## 6. Sistema de quests (Resource-based, Godot 4)
+
+Arquitetura completa para gerenciar missões com estados, objetivos, e integração
+com diálogo via sinais.
+
+### Quest Resource (dados da missão)
+
+```gdscript
+class_name Quest
+extends Resource
+
+signal state_changed(new_state: State)
+signal objective_updated(objective_id: String, current: int, target: int)
+signal completed
+
+enum State { INACTIVE, AVAILABLE, ACTIVE, COMPLETED, FAILED }
+
+@export var id: String
+@export var title: String
+@export_multiline var description: String
+@export var objectives: Array[QuestObjective] = []
+@export var prerequisites: Array[String] = []
+@export var rewards: Array[Resource] = []
+@export var is_repeatable: bool = false
+@export var auto_complete: bool = true
+
+var state: State = State.INACTIVE:
+    set(value):
+        if state == value: return
+        state = value
+        state_changed.emit(state)
+        if state == State.COMPLETED:
+            completed.emit()
+
+func start() -> void:
+    if state != State.AVAILABLE: return
+    state = State.ACTIVE
+    for obj in objectives:
+        obj.reset()
+
+func update_objective(objective_id: String, amount: int = 1) -> void:
+    if state != State.ACTIVE: return
+    for obj in objectives:
+        if obj.id == objective_id:
+            obj.advance(amount)
+            objective_updated.emit(obj.id, obj.current, obj.target)
+            break
+    if auto_complete and is_all_complete():
+        complete()
+
+func complete() -> void:
+    state = State.COMPLETED
+
+func fail() -> void:
+    state = State.FAILED
+
+func is_all_complete() -> bool:
+    return objectives.all(func(obj): return obj.is_complete())
+
+func serialize() -> Dictionary:
+    var obj_data := []
+    for obj in objectives:
+        obj_data.append({"id": obj.id, "current": obj.current})
+    return {"id": id, "state": state, "objectives": obj_data}
+
+func deserialize(data: Dictionary) -> void:
+    state = data.get("state", State.INACTIVE)
+    for obj_data in data.get("objectives", []):
+        for obj in objectives:
+            if obj.id == obj_data["id"]:
+                obj.current = obj_data["current"]
+```
+
+### QuestObjective (sub-objetivo)
+
+```gdscript
+class_name QuestObjective
+extends Resource
+
+enum Type { COLLECT, KILL, TALK, REACH, INTERACT, CUSTOM }
+
+@export var id: String
+@export var description: String
+@export var type: Type = Type.CUSTOM
+@export var target: int = 1
+@export var is_optional: bool = false
+
+var current: int = 0
+
+func advance(amount: int = 1) -> void:
+    current = mini(current + amount, target)
+
+func is_complete() -> bool:
+    return current >= target or is_optional
+
+func reset() -> void:
+    current = 0
+
+func get_progress_text() -> String:
+    return "%s (%d/%d)" % [description, current, target]
+```
+
+### QuestManager (autoload)
+
+```gdscript
+# QuestManager — autoload que gerencia o ciclo de vida das quests
+extends Node
+
+signal quest_started(quest: Quest)
+signal quest_completed(quest: Quest)
+signal quest_failed(quest: Quest)
+signal quest_available(quest: Quest)
+
+var _all_quests: Dictionary = {}    # id → Quest
+var _active: Array[Quest] = []
+var _completed: Array[String] = []  # IDs
+
+func register_quest(quest: Quest) -> void:
+    _all_quests[quest.id] = quest
+
+func load_quests_from_directory(path: String) -> void:
+    var dir := DirAccess.open(path)
+    if not dir: return
+    dir.list_dir_begin()
+    var file_name := dir.get_next()
+    while file_name != "":
+        if file_name.ends_with(".tres"):
+            var quest := load(path.path_join(file_name)) as Quest
+            if quest:
+                register_quest(quest)
+        file_name = dir.get_next()
+
+func make_available(quest_id: String) -> void:
+    var quest := _all_quests.get(quest_id) as Quest
+    if not quest or quest.state != Quest.State.INACTIVE: return
+    # Verificar pré-requisitos
+    for prereq in quest.prerequisites:
+        if prereq not in _completed:
+            return
+    quest.state = Quest.State.AVAILABLE
+    quest_available.emit(quest)
+
+func start_quest(quest_id: String) -> void:
+    var quest := _all_quests.get(quest_id) as Quest
+    if not quest: return
+    quest.start()
+    _active.append(quest)
+    quest_started.emit(quest)
+
+func notify_event(objective_type: String, objective_id: String, amount: int = 1) -> void:
+    for quest in _active:
+        quest.update_objective(objective_id, amount)
+        if quest.state == Quest.State.COMPLETED:
+            _on_quest_completed(quest)
+
+func _on_quest_completed(quest: Quest) -> void:
+    _active.erase(quest)
+    _completed.append(quest.id)
+    quest_completed.emit(quest)
+    # Verificar se novos quests ficam disponíveis
+    for q in _all_quests.values():
+        if q.state == Quest.State.INACTIVE:
+            make_available(q.id)
+
+func get_active_quests() -> Array[Quest]:
+    return _active
+
+func is_completed(quest_id: String) -> bool:
+    return quest_id in _completed
+
+func serialize() -> Dictionary:
+    var active_data := []
+    for quest in _active:
+        active_data.append(quest.serialize())
+    return {"active": active_data, "completed": _completed}
+
+func deserialize(data: Dictionary) -> void:
+    _completed = data.get("completed", [])
+    for quest_data in data.get("active", []):
+        var quest := _all_quests.get(quest_data["id"]) as Quest
+        if quest:
+            quest.deserialize(quest_data)
+            _active.append(quest)
+```
+
+### Integração com diálogo (evento de NPC)
+
+```gdscript
+# No NPC — ao terminar diálogo, ativa/progride quest
+func _on_dialogue_finished() -> void:
+    if not QuestManager.is_completed("find_amulet"):
+        QuestManager.start_quest("find_amulet")
+
+# Em qualquer sistema (ex.: inimigo ao morrer)
+func die() -> void:
+    QuestManager.notify_event("kill", "kill_slimes")
+    queue_free()
+
+# Ao coletar item
+func collect(item_id: String) -> void:
+    QuestManager.notify_event("collect", item_id)
+```
+
+### HUD de quest ativa (minitracker)
+
+```gdscript
+extends PanelContainer
+
+@onready var title_label: Label = %TitleLabel
+@onready var objectives_vbox: VBoxContainer = %ObjectivesVBox
+
+func _ready() -> void:
+    QuestManager.quest_started.connect(_on_quest_started)
+
+func _on_quest_started(quest: Quest) -> void:
+    title_label.text = quest.title
+    _rebuild_objectives(quest)
+    quest.objective_updated.connect(func(_id, _c, _t): _rebuild_objectives(quest))
+
+func _rebuild_objectives(quest: Quest) -> void:
+    for child in objectives_vbox.get_children():
+        child.queue_free()
+    for obj in quest.objectives:
+        var label := Label.new()
+        label.text = ("[ ] " if not obj.is_complete() else "[x] ") + obj.get_progress_text()
+        objectives_vbox.add_child(label)
+```
+
+**Padrões arquiteturais:**
+- Quests como **Resource** (.tres) — crie no Inspector, organize em pasta `data/quests/`.
+- QuestManager como **autoload** — único ponto de acesso, desacoplado de cenas.
+- Comunicação via **sinais** — NPCs/inimigos/itens nunca acessam o QuestManager
+  diretamente; disparam eventos genéricos.
+- **Serialize/deserialize** — o QuestManager salva/carrega o estado com o save system.
+- **Pré-requisitos** — quests encadeadas (completar A libera B) via lista de IDs.
