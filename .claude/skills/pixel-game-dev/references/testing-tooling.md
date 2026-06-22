@@ -228,6 +228,166 @@ O `fade_only` serve para mudanças dentro da mesma cena (ex.: trocar de sala).
 
 ---
 
+## 6. Input remapping (rebind de controles em runtime)
+
+Permite o jogador reconfigurar teclas/botões. Padrão: salvar em JSON, aplicar
+no `InputMap` ao iniciar.
+
+```gdscript
+# InputRemapper — autoload
+extends Node
+
+const SAVE_PATH := "user://input_config.json"
+
+var _default_events: Dictionary = {}
+
+func _ready() -> void:
+    _save_defaults()
+    load_remaps()
+
+func _save_defaults() -> void:
+    for action in InputMap.get_actions():
+        if action.begins_with("ui_"): continue
+        _default_events[action] = InputMap.action_get_events(action).duplicate()
+
+func remap_action(action: String, new_event: InputEvent) -> void:
+    InputMap.action_erase_events(action)
+    InputMap.action_add_event(action, new_event)
+    save_remaps()
+
+func reset_action(action: String) -> void:
+    if _default_events.has(action):
+        InputMap.action_erase_events(action)
+        for event in _default_events[action]:
+            InputMap.action_add_event(action, event)
+    save_remaps()
+
+func reset_all() -> void:
+    for action in _default_events:
+        reset_action(action)
+
+func save_remaps() -> void:
+    var data := {}
+    for action in _default_events:
+        var events := InputMap.action_get_events(action)
+        var serialized := []
+        for event in events:
+            if event is InputEventKey:
+                serialized.append({"type": "key", "keycode": event.physical_keycode})
+            elif event is InputEventJoypadButton:
+                serialized.append({"type": "joypad", "button": event.button_index})
+        data[action] = serialized
+    var file := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
+    file.store_string(JSON.stringify(data, "\t"))
+
+func load_remaps() -> void:
+    if not FileAccess.file_exists(SAVE_PATH): return
+    var file := FileAccess.open(SAVE_PATH, FileAccess.READ)
+    var json := JSON.new()
+    if json.parse(file.get_as_text()) != OK: return
+    var data: Dictionary = json.data
+    for action in data:
+        InputMap.action_erase_events(action)
+        for entry in data[action]:
+            var event: InputEvent
+            match entry["type"]:
+                "key":
+                    event = InputEventKey.new()
+                    event.physical_keycode = entry["keycode"]
+                "joypad":
+                    event = InputEventJoypadButton.new()
+                    event.button_index = entry["button"]
+            if event:
+                InputMap.action_add_event(action, event)
+
+func get_action_display_name(action: String) -> String:
+    var events := InputMap.action_get_events(action)
+    if events.is_empty(): return "[Não atribuído]"
+    return events[0].as_text()
+```
+
+**UI de remap:** no menu de opções, ao clicar num slot de ação:
+1. Mostra "Pressione uma tecla..."
+2. Captura o próximo `InputEvent` com `_input(event)`
+3. Chama `InputRemapper.remap_action(action_name, event)`
+4. Atualiza o label do botão
+
+---
+
+## 7. Object Pool (reuso de instâncias)
+
+Evita criar/destruir centenas de nós por frame (projéteis, partículas, inimigos).
+
+```gdscript
+class_name ObjectPool
+extends Node
+
+var _scene: PackedScene
+var _pool: Array[Node] = []
+var _active: Array[Node] = []
+@export var initial_size: int = 20
+
+func _init(scene: PackedScene = null, size: int = 20) -> void:
+    _scene = scene
+    initial_size = size
+
+func _ready() -> void:
+    for i in initial_size:
+        var instance := _scene.instantiate()
+        instance.set_process(false)
+        instance.hide()
+        add_child(instance)
+        _pool.append(instance)
+
+func get_instance() -> Node:
+    var instance: Node
+    if _pool.is_empty():
+        instance = _scene.instantiate()
+        add_child(instance)
+    else:
+        instance = _pool.pop_back()
+    instance.set_process(true)
+    instance.show()
+    _active.append(instance)
+    return instance
+
+func release(instance: Node) -> void:
+    if instance in _active:
+        _active.erase(instance)
+    instance.set_process(false)
+    instance.hide()
+    _pool.append(instance)
+
+func release_all() -> void:
+    for instance in _active.duplicate():
+        release(instance)
+```
+
+**Uso típico (projéteis):**
+```gdscript
+@onready var bullet_pool := ObjectPool.new(preload("res://scenes/bullet.tscn"), 30)
+
+func _ready() -> void:
+    add_child(bullet_pool)
+
+func shoot() -> void:
+    var bullet := bullet_pool.get_instance() as Bullet
+    bullet.global_position = muzzle.global_position
+    bullet.direction = aim_direction
+    bullet.setup(bullet_pool)  # bullet chama pool.release(self) ao sair da tela
+```
+
+No script do projétil:
+```gdscript
+var _pool: ObjectPool
+func setup(pool: ObjectPool) -> void:
+    _pool = pool
+func _on_screen_exited() -> void:
+    _pool.release(self)
+```
+
+---
+
 ## Checklist de produção
 
 - [ ] Lógica crítica coberta por testes (dano, inventário, save, geração).

@@ -25,6 +25,155 @@ Sistemas essenciais:
 
 Loop mínimo jogável: player que corre/pula numa fase Tiled com inimigo e meta.
 
+### Controlador de plataforma profissional (implementação completa)
+
+Sistema com pulo baseado em física real (altura → gravidade calculada), coyote
+time, jump buffer, pulo variável (soltar = menor), double jump e falling gravity
+multiplier.
+
+```gdscript
+extends CharacterBody2D
+class_name PlatformerController2D
+
+signal jumped(is_ground_jump: bool)
+signal hit_ground()
+
+@export var input_left: String = "move_left"
+@export var input_right: String = "move_right"
+@export var input_jump: String = "jump"
+
+@export var max_jump_height: float = 150.0:
+    set(value):
+        _max_jump_height = value
+        _recalculate_physics()
+@export var min_jump_height: float = 60.0
+@export var double_jump_height: float = 100.0
+@export var jump_duration: float = 0.3:
+    set(value):
+        _jump_duration = value
+        _recalculate_physics()
+@export var falling_gravity_multiplier: float = 1.5
+@export var max_jump_amount: int = 1
+@export var max_acceleration: float = 10000.0
+@export var friction: float = 20.0
+@export var can_hold_jump: bool = false
+@export var coyote_time: float = 0.1
+@export var jump_buffer: float = 0.1
+
+var _max_jump_height: float
+var _jump_duration: float
+var default_gravity: float
+var jump_velocity: float
+var double_jump_velocity: float
+var release_gravity_multiplier: float
+
+var jumps_left: int
+var holding_jump := false
+var _was_on_ground: bool
+
+enum JumpType { NONE, GROUND, AIR }
+var current_jump_type: JumpType = JumpType.NONE
+
+@onready var coyote_timer := Timer.new()
+@onready var jump_buffer_timer := Timer.new()
+
+func _init():
+    _recalculate_physics()
+
+func _ready():
+    if coyote_time > 0:
+        add_child(coyote_timer)
+        coyote_timer.wait_time = coyote_time
+        coyote_timer.one_shot = true
+    if jump_buffer > 0:
+        add_child(jump_buffer_timer)
+        jump_buffer_timer.wait_time = jump_buffer
+        jump_buffer_timer.one_shot = true
+
+func _physics_process(delta: float) -> void:
+    if not coyote_timer.is_stopped() or current_jump_type == JumpType.NONE:
+        jumps_left = max_jump_amount
+    if is_on_floor() and current_jump_type == JumpType.NONE:
+        coyote_timer.start()
+
+    if not _was_on_ground and is_on_floor():
+        current_jump_type = JumpType.NONE
+        if not jump_buffer_timer.is_stopped() and not can_hold_jump:
+            jump()
+        hit_ground.emit()
+
+    if Input.is_action_pressed(input_jump) and can_hold_jump:
+        if _can_ground_jump():
+            jump()
+
+    var gravity := _apply_gravity_multipliers(default_gravity)
+    var acc := Vector2()
+    if Input.is_action_pressed(input_left): acc.x = -max_acceleration
+    if Input.is_action_pressed(input_right): acc.x = max_acceleration
+    acc.y = gravity
+
+    velocity.x *= 1.0 / (1.0 + delta * friction)
+    velocity += acc * delta
+    _was_on_ground = is_on_floor()
+    move_and_slide()
+
+func _unhandled_input(event: InputEvent) -> void:
+    if event.is_action_pressed(input_jump):
+        holding_jump = true
+        jump_buffer_timer.start()
+        if (not can_hold_jump and _can_ground_jump()) or _can_double_jump():
+            jump()
+    elif event.is_action_released(input_jump):
+        holding_jump = false
+
+func jump() -> void:
+    if _can_double_jump():
+        velocity.y = -double_jump_velocity
+        current_jump_type = JumpType.AIR
+        if jumps_left == max_jump_amount:
+            jumps_left -= 1
+        jumps_left -= 1
+        jumped.emit(false)
+    else:
+        velocity.y = -jump_velocity
+        current_jump_type = JumpType.GROUND
+        jumps_left -= 1
+        coyote_timer.stop()
+        jumped.emit(true)
+
+func _can_ground_jump() -> bool:
+    return (jumps_left > 0 and current_jump_type == JumpType.NONE) \
+        or not coyote_timer.is_stopped()
+
+func _can_double_jump() -> bool:
+    if jumps_left <= 1 and jumps_left == max_jump_amount:
+        return false
+    return jumps_left > 0 and not is_on_floor() and coyote_timer.is_stopped()
+
+func _apply_gravity_multipliers(gravity: float) -> float:
+    if velocity.y > 0:
+        gravity *= falling_gravity_multiplier
+    elif velocity.y < 0 and not holding_jump:
+        if current_jump_type != JumpType.AIR:
+            gravity *= release_gravity_multiplier
+    return gravity
+
+func _recalculate_physics() -> void:
+    default_gravity = (2.0 * _max_jump_height) / pow(_jump_duration, 2)
+    jump_velocity = (2.0 * _max_jump_height) / _jump_duration
+    double_jump_velocity = sqrt(abs(2.0 * default_gravity * double_jump_height))
+    release_gravity_multiplier = (pow(jump_velocity, 2) / (2.0 * min_jump_height)) / default_gravity
+```
+
+**Fórmulas de pulo baseadas em game design (não em valores mágicos):**
+- Gravidade = `2h / t²` onde h=altura máx, t=tempo até o pico
+- Vel. pulo = `2h / t`
+- Isso permite tunar "quero pular 3 tiles de altura em 0.3s" diretamente.
+
+**Coyote time:** ~0.08–0.12s permite pular logo após cair de plataforma.
+**Jump buffer:** ~0.1–0.15s registra input apertado antes de aterrissar.
+**Pulo variável:** ao soltar jump, multiplica gravidade para encurtar o arco.
+
 ---
 
 ## 2. RPG top-down (estilo clássico / Zelda-like / turn-based)

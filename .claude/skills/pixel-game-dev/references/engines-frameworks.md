@@ -96,6 +96,117 @@ func _physics_process(_delta):
 > roguelike com geração procedural por andar, e template top-down mínimo (player
 > + TileMap + câmera) como ponto de partida copiável.
 
+### Máquina de estados (FSM) — padrão fundamental
+
+Arquitetura onde estados são nós filhos do `StateMachine`. Cada estado implementa
+`enter()`, `exit()`, `update()`, `physics_update()`. A máquina delega tudo ao
+estado atual.
+
+**State (classe base):**
+```gdscript
+class_name State
+extends Node
+
+signal state_finished(next_state_name: String)
+
+var entity: CharacterBody2D
+
+func enter() -> void:
+    pass
+
+func exit() -> void:
+    pass
+
+func update(delta: float) -> void:
+    pass
+
+func physics_update(delta: float) -> void:
+    pass
+
+func handle_input(event: InputEvent) -> void:
+    pass
+```
+
+**StateMachine:**
+```gdscript
+class_name StateMachine
+extends Node
+
+signal state_changed(from_state: State, to_state: State)
+
+@export var initial_state: State
+
+var current_state: State
+var states: Dictionary = {}
+
+func _ready() -> void:
+    for child in get_children():
+        if child is State:
+            states[child.name.to_lower()] = child
+            child.entity = get_parent()
+            child.state_finished.connect(_on_state_finished)
+    if initial_state:
+        current_state = initial_state
+    elif not states.is_empty():
+        current_state = states.values()[0]
+    current_state.enter()
+
+func _process(delta: float) -> void:
+    current_state.update(delta)
+
+func _physics_process(delta: float) -> void:
+    current_state.physics_update(delta)
+
+func _unhandled_input(event: InputEvent) -> void:
+    current_state.handle_input(event)
+
+func transition_to(state_name: String) -> void:
+    var new_state: State = states.get(state_name.to_lower())
+    if new_state == null or new_state == current_state:
+        return
+    current_state.exit()
+    var old := current_state
+    current_state = new_state
+    current_state.enter()
+    state_changed.emit(old, current_state)
+
+func _on_state_finished(next_state_name: String) -> void:
+    transition_to(next_state_name)
+```
+
+**Estado concreto (exemplo: Idle/Run/Jump):**
+```gdscript
+class_name IdleState extends State
+
+func enter() -> void:
+    entity.velocity.x = 0
+    entity.get_node("AnimatedSprite2D").play("idle")
+
+func physics_update(delta: float) -> void:
+    if not entity.is_on_floor():
+        state_finished.emit("fall")
+        return
+    if Input.get_axis("move_left", "move_right") != 0:
+        state_finished.emit("run")
+    elif Input.is_action_just_pressed("jump"):
+        state_finished.emit("jump")
+```
+
+**Montagem na cena:**
+```
+Player (CharacterBody2D)
+├── AnimatedSprite2D
+├── CollisionShape2D
+└── StateMachine (Node)
+    ├── Idle (IdleState)
+    ├── Run (RunState)
+    ├── Jump (JumpState)
+    └── Fall (FallState)
+```
+
+Cada estado é um nó — pode ter seus próprios filhos (timers, raycasts) e ser
+depurado individualmente no Inspector.
+
 ---
 
 ## 2. Phaser 3 (JavaScript/TypeScript) — jogo web/mobile

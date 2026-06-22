@@ -224,3 +224,161 @@ Boas práticas comuns:
 - **Localização:** todos esses sistemas extraem strings para tradução — planeje
   IDs de linha desde o início.
 - **Teste com seeds fixas** (Ink `SEED_RANDOM`) para reproduzir ramos.
+
+---
+
+## 5. Caixa de diálogo com efeito typewriter (implementação prática)
+
+Padrão completo para caixa de diálogo pixel-art com efeito de digitação,
+retrato de personagem e avanço por input.
+
+### Estrutura de cena
+```
+DialogueBox (Control — anchors bottom-wide)
+├── NinePatchRect (fundo da caixa — texture pixel-art, margins configuradas)
+│   ├── MarginContainer
+│   │   ├── HBoxContainer
+│   │   │   ├── Portrait (TextureRect — 48×48 ou 64×64)
+│   │   │   └── VBoxContainer
+│   │   │       ├── NameLabel (Label — pixel font, bold)
+│   │   │       └── DialogueLabel (RichTextLabel — pixel font)
+│   └── AdvanceIndicator (TextureRect — seta animada, bottom-right)
+├── AnimationPlayer (para AdvanceIndicator pulsando)
+└── AudioStreamPlayer (sfx de digitação — blip curto)
+```
+
+### Script completo
+
+```gdscript
+class_name DialogueBox
+extends Control
+
+signal dialogue_finished
+signal line_finished
+
+@export var char_speed: float = 0.03
+@export var punctuation_pause: float = 0.12
+
+@onready var portrait: TextureRect = %Portrait
+@onready var name_label: Label = %NameLabel
+@onready var dialogue_label: RichTextLabel = %DialogueLabel
+@onready var advance_indicator: TextureRect = %AdvanceIndicator
+@onready var blip_player: AudioStreamPlayer = %BlipPlayer
+
+var _lines: Array[Dictionary] = []
+var _current_line: int = -1
+var _tween: Tween
+var _is_typing := false
+var _is_active := false
+
+func start_dialogue(lines: Array[Dictionary]) -> void:
+    _lines = lines
+    _current_line = -1
+    _is_active = true
+    visible = true
+    advance_indicator.visible = false
+    _advance()
+
+func _advance() -> void:
+    _current_line += 1
+    if _current_line >= _lines.size():
+        _close()
+        return
+    var entry: Dictionary = _lines[_current_line]
+    name_label.text = entry.get("name", "")
+    if entry.has("portrait"):
+        portrait.texture = entry["portrait"]
+        portrait.visible = true
+    else:
+        portrait.visible = false
+    dialogue_label.text = entry.get("text", "")
+    dialogue_label.visible_ratio = 0.0
+    advance_indicator.visible = false
+    _type_text()
+
+func _type_text() -> void:
+    _is_typing = true
+    var total_chars := dialogue_label.get_total_character_count()
+    if total_chars == 0:
+        _finish_line()
+        return
+    var duration := total_chars * char_speed
+    if _tween:
+        _tween.kill()
+    _tween = create_tween()
+    _tween.tween_property(dialogue_label, "visible_ratio", 1.0, duration)
+    _tween.tween_callback(_finish_line)
+    _start_blip_timer(total_chars)
+
+func _start_blip_timer(total_chars: int) -> void:
+    for i in range(total_chars):
+        var delay := i * char_speed
+        var char := _get_char_at(i)
+        if char in [".", ",", "!", "?", ";"]:
+            delay += punctuation_pause
+        get_tree().create_timer(delay).timeout.connect(
+            func(): if _is_typing: blip_player.play()
+        )
+
+func _get_char_at(index: int) -> String:
+    var stripped := dialogue_label.get_parsed_text()
+    if index < stripped.length():
+        return stripped[index]
+    return ""
+
+func _finish_line() -> void:
+    _is_typing = false
+    dialogue_label.visible_ratio = 1.0
+    advance_indicator.visible = true
+    line_finished.emit()
+
+func _skip_typing() -> void:
+    if _tween:
+        _tween.kill()
+    _finish_line()
+
+func _close() -> void:
+    _is_active = false
+    visible = false
+    dialogue_finished.emit()
+
+func _unhandled_input(event: InputEvent) -> void:
+    if not _is_active:
+        return
+    if event.is_action_pressed("ui_accept") or event.is_action_pressed("interact"):
+        get_viewport().set_input_as_handled()
+        if _is_typing:
+            _skip_typing()
+        else:
+            _advance()
+```
+
+### Uso
+
+```gdscript
+var lines := [
+    {"name": "Mago", "portrait": preload("res://assets/portraits/mago.png"),
+     "text": "O cristal está se fragmentando... precisamos agir rápido."},
+    {"name": "Guerreira", "portrait": preload("res://assets/portraits/guerreira.png"),
+     "text": "Deixa comigo. Cobre minha retaguarda!"},
+    {"name": "", "text": "O chão tremeu sob seus pés..."},
+]
+$DialogueBox.start_dialogue(lines)
+await $DialogueBox.dialogue_finished
+# continua gameplay
+```
+
+### Variações e dicas
+
+- **Pausa em pontuação:** o timer extra em `.` `,` `!` `?` cria ritmo natural.
+- **BBCode no RichTextLabel:** use `[color]`, `[wave]`, `[shake]` para ênfase
+  inline — `visible_ratio` respeita tags BBCode automaticamente.
+- **Múltiplas velocidades:** segure um botão para 3× a velocidade
+  (`char_speed / 3`).
+- **Escolhas inline:** ao final de uma linha com `choices`, instancie botões
+  dentro do VBox e conecte ao sistema de narrative (Ink/Yarn).
+- **NinePatchRect pixel-perfect:** configure `patch_margin` nos 4 lados (ex.: 8px
+  se a borda da textura tem 8px), e use `axis_stretch_mode = TILE` para manter
+  pixel crisp.
+- **Integração com Ink/Yarn:** substitua o array de dicts por um parser que lê
+  linhas do Ink runner ou Yarn dialogue runner e popula `_lines` dinamicamente.

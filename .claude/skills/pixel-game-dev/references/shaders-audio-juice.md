@@ -53,6 +53,57 @@ func _process(delta: float) -> void:
 ```
 Chame `add_trauma(0.4)` ao acertar; `0.8` numa explosão.
 
+### Screen shake via Tween (alternativa — sem _process)
+
+Abordagem com `tween_method` — autoconsumível, suporta intensidade + rotação,
+não requer variável persistente:
+
+```gdscript
+func camera_shake(intensity: float = 1.5, duration: float = 0.4,
+        decay: float = 3.0, camera: Camera2D = get_viewport().get_camera_2d()) -> void:
+    if camera.has_meta("shake_tween") and camera.get_meta("shake_tween").is_valid():
+        camera.get_meta("shake_tween").kill()
+    var tween := create_tween()
+    camera.set_meta("shake_tween", tween)
+    var origin_pos := camera.offset
+    var origin_rot := camera.rotation
+
+    var shake_fn := func(progress: float) -> void:
+        var remaining := 1.0 - progress
+        var strength := intensity * pow(remaining, decay)
+        if strength > 0.01:
+            camera.offset = origin_pos + Vector2(
+                randf_range(-1, 1) * strength * 5.0,
+                randf_range(-1, 1) * strength * 5.0)
+            camera.rotation = origin_rot + randf_range(-1, 1) * strength * 0.05
+        else:
+            camera.offset = origin_pos
+            camera.rotation = origin_rot
+
+    tween.tween_method(shake_fn, 0.0, 1.0, duration)
+    tween.tween_callback(func():
+        camera.offset = origin_pos
+        camera.rotation = origin_rot)
+```
+
+**Quando usar cada:**
+- **Trauma (variável):** melhor para múltiplas fontes somando shake continuamente
+  (balas, hits rápidos). Decai suavemente a cada frame.
+- **Tween (one-shot):** melhor para eventos pontuais (explosão, boss slam). Mais
+  simples de chamar, auto-cleanup.
+
+### Hit stop / freeze frame
+
+```gdscript
+func hit_stop(duration: float = 0.05) -> void:
+    Engine.time_scale = 0.0
+    await get_tree().create_timer(duration, true, false, true).timeout
+    Engine.time_scale = 1.0
+```
+
+Combine: `hit_stop(0.04)` + `camera_shake(2.0, 0.3)` + hit flash = impacto
+poderoso. O quarto param `true` no Timer ignora time_scale (processa em real time).
+
 ---
 
 ## 3. Shaders 2D essenciais para pixel
