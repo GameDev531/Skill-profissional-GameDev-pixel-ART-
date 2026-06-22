@@ -230,9 +230,78 @@ App()
 ```
 Pyxel traz **editor de sprite, tilemap, som e música embutidos** (`pyxel edit`).
 
+**Platformer completo (colisão por tilemap, inimigos, scroll, game over):**
+```python
+import pyxel
+
+TRANSPARENT_COLOR = 2
+SCROLL_BORDER_X = 80
+WALL_TILE_X = 4
+scroll_x = 0
+
+def is_wall(x, y):
+    tile = pyxel.tilemaps[0].pget(x // 8, y // 8)
+    return tile[0] >= WALL_TILE_X
+
+class Player:
+    def __init__(self, x, y):
+        self.x, self.y = x, y
+        self.dx, self.dy = 0, 0
+        self.direction = 1
+        self.is_falling = False
+
+    def update(self):
+        global scroll_x
+        last_y = self.y
+        if pyxel.btn(pyxel.KEY_LEFT): self.dx = -2; self.direction = -1
+        if pyxel.btn(pyxel.KEY_RIGHT): self.dx = 2; self.direction = 1
+        self.dy = min(self.dy + 1, 3)  # gravidade
+        if pyxel.btnp(pyxel.KEY_SPACE):
+            self.dy = -6
+            pyxel.play(3, 8)
+        # colisão via tilemaps[0].collide(x, y, w, h, dx, dy, wall_tiles)
+        walls = [(u, v) for u in range(WALL_TILE_X, 32) for v in range(32)]
+        self.dx, self.dy = pyxel.tilemaps[0].collide(
+            self.x, self.y, 8, 8, self.dx, self.dy, walls)
+        self.x += self.dx; self.y += self.dy
+        self.dx = int(self.dx * 0.8)
+        self.is_falling = self.y > last_y
+        if self.x > scroll_x + SCROLL_BORDER_X:
+            scroll_x = min(self.x - SCROLL_BORDER_X, 240 * 8)
+
+    def draw(self):
+        u = (2 if self.is_falling else pyxel.frame_count // 3 % 2) * 8
+        w = 8 if self.direction > 0 else -8
+        pyxel.blt(self.x, self.y, 0, u, 16, w, 8, TRANSPARENT_COLOR)
+
+class App:
+    def __init__(self):
+        pyxel.init(128, 128, title="Pyxel Platformer")
+        pyxel.load("assets/platformer.pyxres")
+        self.player = Player(0, 0)
+        pyxel.playm(0, loop=True)
+        pyxel.run(self.update, self.draw)
+
+    def update(self):
+        self.player.update()
+
+    def draw(self):
+        pyxel.cls(0)
+        pyxel.camera()
+        pyxel.bltm(0, 0, 0, scroll_x, 0, 128, 128, TRANSPARENT_COLOR)
+        pyxel.camera(scroll_x, 0)
+        self.player.draw()
+
+App()
+```
+Nota: `pyxel.tilemaps[0].collide()` resolve colisão AABB contra tiles marcados —
+é o A* da colisão embutido do Pyxel. `blt` com largura negativa espelha o sprite.
+
 > Padrões a dominar em Pyxel: classe `App` com `update()`/`draw()`, banco de
 > assets `.pyxres` (editado em `pyxel edit`), `blt` para sprites e `bltm` para
-> tilemaps, e os 4 canais de som com `play`/`playm`.
+> tilemaps, `tilemaps[].collide()` para colisão por tile, `blt` com w/h negativo
+> para espelhar sprites, `play`/`playm` nos 4 canais de som, e
+> `pyxel.camera(x,y)` para scroll.
 
 ---
 

@@ -161,6 +161,106 @@ void fragment() {
 ```
 Ótimo para transições estilo "buraco negro" (wipe circular). Anime `fadeAmount`.
 
+### Shader 6 — CRT / VHS monitor (pós-processamento)
+```glsl
+shader_type canvas_item;
+uniform bool overlay = false;
+uniform float scanlines_opacity : hint_range(0.0, 1.0) = 0.4;
+uniform float scanlines_width : hint_range(0.0, 0.5) = 0.25;
+uniform float grille_opacity : hint_range(0.0, 1.0) = 0.3;
+uniform vec2 resolution = vec2(320.0, 180.0);
+uniform bool pixelate = true;
+uniform float aberration : hint_range(-1.0, 1.0) = 0.03;
+uniform float brightness = 1.4;
+uniform float warp_amount : hint_range(0.0, 5.0) = 1.0;
+uniform float vignette_intensity = 0.4;
+uniform float vignette_opacity : hint_range(0.0, 1.0) = 0.5;
+
+vec2 warp(vec2 uv) {
+    vec2 delta = uv - 0.5;
+    float delta2 = dot(delta.xy, delta.xy);
+    return uv + delta * delta2 * delta2 * warp_amount;
+}
+
+float vignette(vec2 uv) {
+    uv *= 1.0 - uv.xy;
+    float vig = uv.x * uv.y * 15.0;
+    return pow(vig, vignette_intensity * vignette_opacity);
+}
+
+void fragment() {
+    vec2 uv = overlay ? warp(SCREEN_UV) : warp(UV);
+    vec2 text_uv = pixelate ? ceil(uv * resolution) / resolution : uv;
+
+    vec4 text;
+    text.r = texture(SCREEN_TEXTURE, text_uv + vec2(aberration, 0.0) * 0.1).r;
+    text.g = texture(SCREEN_TEXTURE, text_uv - vec2(aberration, 0.0) * 0.1).g;
+    text.b = texture(SCREEN_TEXTURE, text_uv).b;
+    text.a = 1.0;
+
+    // Grille RGB (simula fósforos do CRT)
+    if (grille_opacity > 0.0) {
+        float g_r = smoothstep(0.85, 0.95, abs(sin(uv.x * resolution.x * 3.14159)));
+        float g_g = smoothstep(0.85, 0.95, abs(sin(1.05 + uv.x * resolution.x * 3.14159)));
+        float g_b = smoothstep(0.85, 0.95, abs(sin(2.1 + uv.x * resolution.x * 3.14159)));
+        text.r = mix(text.r, text.r * g_r, grille_opacity);
+        text.g = mix(text.g, text.g * g_g, grille_opacity);
+        text.b = mix(text.b, text.b * g_b, grille_opacity);
+    }
+    text.rgb = clamp(text.rgb * brightness, vec3(0.0), vec3(1.0));
+
+    // Scanlines
+    if (scanlines_opacity > 0.0) {
+        float sl = smoothstep(scanlines_width, scanlines_width + 0.5,
+            abs(sin(uv.y * resolution.y * 3.14159)));
+        text.rgb = mix(text.rgb, text.rgb * vec3(sl), scanlines_opacity);
+    }
+
+    text.rgb *= vignette(uv);
+    COLOR = text;
+}
+```
+Aplique num `ColorRect` sobre a câmera via `CanvasLayer` (layer alto). Ajuste
+`resolution` para a resolução base do jogo (160×144 para GB, 320×180 para
+16-bit). O `warp_amount` simula a curvatura do vidro.
+
+### Shader 7 — Water 2D (reflexo + ondulação)
+```glsl
+shader_type canvas_item;
+uniform sampler2D SCREEN_TEXTURE : hint_screen_texture, repeat_enable, filter_nearest;
+uniform sampler2D waterNoise : repeat_enable, filter_nearest;
+uniform vec4 waterColor : source_color = vec4(0.117, 0.27, 0.58, 1.0);
+uniform float colorMix : hint_range(0.0, 1.0) = 0.35;
+uniform float distortionForce : hint_range(0.0, 0.1) = 0.01;
+uniform float waveBrightness : hint_range(0.0, 3.0) = 1.5;
+uniform float waveFreq : hint_range(0.2, 0.9) = 0.6;
+uniform float waveSize : hint_range(0.6, 1.2) = 0.9;
+uniform vec2 scrollSpeed = vec2(0.1, 0.05);
+
+void fragment() {
+    vec2 waterUV = UV;
+    waterUV.x += scrollSpeed.x * TIME;
+    waterUV.y += cos(TIME * min(1.0, scrollSpeed.y)) * 0.01;
+
+    float noise = texture(waterNoise, waterUV).r;
+    waterUV += noise * distortionForce;
+
+    float intensity = smoothstep(waveFreq, waveSize, texture(waterNoise, waterUV).r);
+    vec4 color = vec4(waterColor.rgb + intensity * waveBrightness, 1.0);
+
+    vec2 bgUV = SCREEN_UV;
+    bgUV += noise * vec2(0.01, 0.01);
+
+    color = mix(texture(SCREEN_TEXTURE, bgUV), color, 0.2);
+    COLOR = mix(color, waterColor, colorMix);
+}
+```
+Coloque um `ColorRect` ou `Sprite2D` cobrindo a área de água. A textura de ruído
+(FastNoiseLite exportada como textura) controla as ondulações. `scrollSpeed`
+anima o fluxo.
+
+---
+
 Organização típica de uma biblioteca de shaders: pasta `Shaders/` com o `.gdshader`
 e `Demos/` com cenas mostrando cada efeito aplicado — estude o demo e copie o
 shader. Para efeitos de tela inteira (CRT, vinheta, color grading), aplique como

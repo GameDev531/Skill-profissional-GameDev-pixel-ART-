@@ -49,7 +49,7 @@ Sistemas essenciais:
 
 ### Sistema de combate turn-based — arquitetura real (Godot 4)
 
-Padrão extraído de sistemas profissionais (GDQuest Open RPG):
+Padrão de sistema de combate profissional para RPGs 2D:
 
 **BattlerStats (Resource):** dados numéricos com modificadores empilháveis.
 ```gdscript
@@ -352,6 +352,285 @@ Sistemas:
 Atenção em isométrico: o **depth sorting** (o que desenha na frente) e o
 **picking** (qual tile o mouse selecionou) são os dois problemas técnicos
 centrais.
+
+### Arquitetura de referência (builder 2D em Godot)
+
+**Hierarquia de classes:**
+```gdscript
+# Entity — base de qualquer item colocado no mundo
+class_name Entity
+extends Node2D
+
+export var deconstruct_filter: String
+export var pickup_count := 1
+
+func toggle_outline(enabled: bool) -> void:
+    for sprite in _sprites:
+        if sprite.material:
+            sprite.material.set_shader_param("line_thickness",
+                3.0 if enabled else 0.0)
+
+func _setup(_blueprint: BlueprintEntity) -> void:
+    pass  # override em subclasses (FurnaceEntity, WireEntity, etc.)
+```
+
+```gdscript
+# BlueprintEntity — representação de item no inventário e durante colocação
+class_name BlueprintEntity
+extends Node2D
+
+export var stack_size := 1
+export var placeable := true
+export (String, MULTILINE) var description := ""
+var stack_count := 1
+
+func make_inventory() -> void:
+    scale = Vector2(gui_scale, gui_scale)
+    modulate = Color.white
+
+func make_world() -> void:
+    scale = Vector2.ONE
+    position = Vector2.ZERO
+
+func rotate_blueprint() -> void:
+    # Rotaciona direções de energia (LEFT→UP→RIGHT→DOWN)
+    pass
+```
+
+**EntityTracker — registro de posições no grid:**
+```gdscript
+class_name EntityTracker
+extends Reference
+
+var entities := {}
+
+func place_entity(entity, cellv: Vector2) -> void:
+    if entities.has(cellv): return
+    entities[cellv] = entity
+    Events.emit_signal("entity_placed", entity, cellv)
+
+func remove_entity(cellv: Vector2) -> void:
+    if entities.has(cellv):
+        var entity = entities[cellv]
+        entities.erase(cellv)
+        Events.emit_signal("entity_removed", entity, cellv)
+        entity.queue_free()
+
+func is_cell_occupied(cellv: Vector2) -> bool:
+    return entities.has(cellv)
+
+func get_entity_at(cellv: Vector2) -> Node2D:
+    return entities.get(cellv)
+```
+
+**EntityPlacer — TileMap que gerencia construção/desconstrução:**
+```gdscript
+class_name EntityPlacer
+extends TileMap
+
+const MAXIMUM_WORK_DISTANCE := 275.0
+var _tracker: EntityTracker
+
+func _unhandled_input(event: InputEvent) -> void:
+    var cellv := world_to_map(get_global_mouse_position())
+    var cell_is_occupied := _tracker.is_cell_occupied(cellv)
+    var is_close := global_mouse_position.distance_to(
+        _player.global_position) < MAXIMUM_WORK_DISTANCE
+    var is_on_ground := _ground.get_cellv(cellv) == 0
+
+    if event.is_action_pressed("left_click"):
+        if has_placeable_blueprint and not cell_is_occupied and is_close and is_on_ground:
+            _place_entity(cellv)
+    elif event.is_action_pressed("right_click"):
+        if cell_is_occupied and is_close:
+            _deconstruct(cellv)
+
+func _place_entity(cellv: Vector2) -> void:
+    var new_entity := Library.entities[blueprint_name].instance()
+    add_child(new_entity)
+    new_entity.global_position = map_to_world(cellv) + POSITION_OFFSET
+    new_entity._setup(blueprint)
+    _tracker.place_entity(new_entity, cellv)
+    blueprint.stack_count -= 1
+```
+
+**PowerSystem — rede de energia com pathfinding de grafos:**
+```gdscript
+class_name PowerSystem
+extends Reference
+
+var power_sources := {}   # cellv → PowerSource
+var power_receivers := {} # cellv → PowerReceiver
+var power_movers := {}    # cellv → Entity (fios)
+var paths := []           # caminhos source→receivers
+
+func _on_systems_ticked(delta: float) -> void:
+    for path in paths:
+        var source: PowerSource = power_sources[path[0]]
+        var available_power := source.get_effective_power()
+        for cell in path.slice(1, path.size() - 1):
+            if not power_receivers.has(cell): continue
+            var receiver: PowerReceiver = power_receivers[cell]
+            var required := receiver.get_effective_power()
+            var delivered := min(available_power, required)
+            receiver.emit_signal("received_power", delivered, delta)
+            available_power -= delivered
+            if available_power == 0: break
+        source.emit_signal("power_updated", available_power, delta)
+
+func _retrace_paths() -> void:
+    paths.clear()
+    for source_cell in power_sources.keys():
+        paths.push_back(_trace_path_from(source_cell, [source_cell]))
+```
+
+**WorkComponent — crafting com progresso:**
+```gdscript
+class_name WorkComponent
+extends Node
+
+signal work_accomplished(amount)
+signal work_done(output)
+signal work_enabled_changed(enabled)
+
+var current_output: BlueprintEntity
+var available_work := 0.0
+var work_speed := 0.0
+var is_enabled := false
+
+func setup_work(inputs: Dictionary, recipe_map: Dictionary) -> bool:
+    for output in recipe_map.keys():
+        var can_craft := true
+        for input in inputs.keys():
+            if inputs[input] < recipe_map[output].inputs.get(input, INF):
+                can_craft = false; break
+        if can_craft:
+            current_output = Library.blueprints[output].instance()
+            current_output.stack_count = recipe_map[output].amount
+            available_work = recipe_map[output].time
+            return true
+    return false
+
+func work(delta: float) -> void:
+    if is_enabled and available_work > 0.0:
+        available_work -= delta * work_speed
+        emit_signal("work_accomplished", delta * work_speed)
+        if available_work <= 0.0:
+            emit_signal("work_done", current_output)
+```
+
+**Padrão geral:** entidades são colocadas no grid via `EntityPlacer`, registradas
+no `EntityTracker` (dict cell→entidade), e sistemas (`PowerSystem`, `WorkSystem`)
+reagem a sinais `entity_placed`/`entity_removed` para atualizar suas listas.
+Blueprints definem a representação de inventário; Entities definem o comportamento
+no mundo. Separação **inventário ↔ mundo** é a chave arquitetural.
+
+---
+
+## 7. Sistema de inventário (Resource-based, Godot 4)
+
+Padrão para qualquer gênero que precise de itens (RPG, survival, builder):
+
+```gdscript
+# ItemData — definição de um tipo de item (Resource, data-driven)
+class_name ItemData
+extends Resource
+
+enum ItemType { CONSUMABLE, EQUIPMENT, MATERIAL, KEY }
+
+@export var name: String
+@export var icon: Texture2D
+@export var item_type: ItemType
+@export var stackable: bool = true
+@export var max_stack: int = 99
+@export var description: String
+
+func can_stack_with(other: ItemData) -> bool:
+    return stackable and resource_path == other.resource_path
+
+func apply_effects(stats) -> void:
+    pass  # override em subclasses (HealItem, BuffItem, etc.)
+```
+
+```gdscript
+# Inventory — container de slots com stacking e sinais
+class_name Inventory
+extends Resource
+
+signal item_added(item: ItemData, slot: int)
+signal item_removed(item: ItemData, slot: int)
+signal item_used(item: ItemData, slot: int)
+signal inventory_changed
+
+class InventorySlot:
+    var item: ItemData
+    var count: int
+    func _init(p_item: ItemData = null, p_count: int = 0) -> void:
+        item = p_item; count = p_count
+
+@export var size: int = 20
+var slots: Array[InventorySlot] = []
+
+func _init() -> void:
+    for i in range(size):
+        slots.append(InventorySlot.new())
+
+func add_item(item: ItemData, amount: int = 1) -> bool:
+    # 1) Tenta stackar com slots existentes
+    if item.stackable:
+        for i in range(slots.size()):
+            var slot = slots[i]
+            if slot.item and slot.item.can_stack_with(item) and slot.count < item.max_stack:
+                var space = item.max_stack - slot.count
+                var add_amount = min(amount, space)
+                slot.count += add_amount
+                amount -= add_amount
+                item_added.emit(item, i)
+                if amount <= 0:
+                    inventory_changed.emit()
+                    return true
+    # 2) Slots vazios para o restante
+    for i in range(slots.size()):
+        if slots[i].item == null:
+            slots[i].item = item
+            slots[i].count = min(amount, item.max_stack)
+            amount -= slots[i].count
+            item_added.emit(item, i)
+            if amount <= 0:
+                inventory_changed.emit()
+                return true
+    inventory_changed.emit()
+    return amount <= 0
+
+func remove_item(slot_index: int, amount: int = 1) -> bool:
+    var slot = slots[slot_index]
+    if slot.item == null or slot.count < amount: return false
+    slot.count -= amount
+    item_removed.emit(slot.item, slot_index)
+    if slot.count <= 0:
+        slot.item = null; slot.count = 0
+    inventory_changed.emit()
+    return true
+
+func use_item(slot_index: int, stats) -> bool:
+    var slot = slots[slot_index]
+    if slot.item == null: return false
+    if slot.item.item_type == ItemData.ItemType.CONSUMABLE:
+        slot.item.apply_effects(stats)
+        remove_item(slot_index)
+        item_used.emit(slot.item, slot_index)
+        return true
+    return false
+```
+
+**Padrões de inventário:**
+- Itens como **Resource** (`ItemData`) permitem definir tudo no Inspector e
+  serializar/salvar facilmente.
+- `Inventory` é Resource → pode ser salvo em disco com `ResourceSaver`.
+- A UI observa `inventory_changed` e redesenha slots.
+- Equipment slots: um segundo `Inventory` (size=6, não-stackable) com validação
+  de `ItemType.EQUIPMENT`.
+- Drag & drop: `_get_drag_data` / `_can_drop_data` / `_drop_data` nos painéis.
 
 ---
 

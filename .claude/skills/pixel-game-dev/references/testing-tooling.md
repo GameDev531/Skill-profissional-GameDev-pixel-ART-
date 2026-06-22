@@ -117,11 +117,98 @@ Git para jogos:
 
 ## 4. Save/load
 
-- Serialize um **dicionário/struct de estado** (posição, stats, inventário,
-  flags de quest, progresso de fase) para JSON ou formato binário da engine.
+Serialize um **dicionário/struct de estado** (posição, stats, inventário,
+flags de quest, progresso de fase) para JSON ou formato binário da engine.
+
+```gdscript
+# SaveSystem — autoload (Godot 4)
+extends Node
+
+const SAVE_PATH := "user://savegame.json"
+const SAVE_VERSION := 1
+
+func save_game(game_state: Dictionary) -> void:
+    game_state["version"] = SAVE_VERSION
+    var file := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
+    file.store_string(JSON.stringify(game_state, "\t"))
+
+func load_game() -> Dictionary:
+    if not FileAccess.file_exists(SAVE_PATH):
+        return {}
+    var file := FileAccess.open(SAVE_PATH, FileAccess.READ)
+    var json := JSON.new()
+    json.parse(file.get_as_text())
+    var data: Dictionary = json.data
+    if data.get("version", 0) < SAVE_VERSION:
+        data = _migrate(data)
+    return data
+
+func _migrate(data: Dictionary) -> Dictionary:
+    # Converta saves antigos para o formato atual
+    return data
+
+func delete_save() -> void:
+    if FileAccess.file_exists(SAVE_PATH):
+        DirAccess.remove_absolute(SAVE_PATH)
+```
+
+**Padrões-chave:**
 - **Versão do save:** inclua um `version` no arquivo para migrar saves antigos.
 - Salve em local apropriado por plataforma (`user://` no Godot).
+- **Colete o estado com um grupo:** faça cada entidade saveable implementar
+  `get_save_data() -> Dictionary` e itere com `get_tree().get_nodes_in_group("saveable")`.
 - Teste o round-trip (salvar→carregar→comparar) num teste automatizado.
+
+---
+
+## 4b. Transição de cena (autoload)
+
+```gdscript
+# SceneTransition — autoload (CanvasLayer com ColorRect)
+extends CanvasLayer
+
+signal transition_started
+signal scene_changed
+signal transition_finished
+
+@onready var color_rect: ColorRect = $ColorRect
+@onready var anim_player: AnimationPlayer = $AnimationPlayer
+var _is_transitioning := false
+
+func change_scene(scene_path: String, duration: float = 0.4) -> void:
+    if _is_transitioning: return
+    _is_transitioning = true
+    transition_started.emit()
+    color_rect.visible = true
+    anim_player.play("fade_out")
+    await anim_player.animation_finished
+    get_tree().change_scene_to_file(scene_path)
+    scene_changed.emit()
+    await get_tree().process_frame
+    anim_player.play("fade_in")
+    await anim_player.animation_finished
+    color_rect.visible = false
+    _is_transitioning = false
+    transition_finished.emit()
+
+func fade_only(callback: Callable, duration: float = 0.4) -> void:
+    if _is_transitioning: return
+    _is_transitioning = true
+    color_rect.visible = true
+    anim_player.play("fade_out")
+    await anim_player.animation_finished
+    callback.call()
+    await get_tree().process_frame
+    anim_player.play("fade_in")
+    await anim_player.animation_finished
+    color_rect.visible = false
+    _is_transitioning = false
+```
+
+**Setup:** `CanvasLayer` (layer alto) com `ColorRect` fullscreen (preto,
+alpha 0) + `AnimationPlayer` com tracks "fade_out" (alpha 0→1) e "fade_in"
+(1→0). Registre como Autoload. Chame: `SceneTransition.change_scene("res://...")`.
+O `fade_only` serve para mudanças dentro da mesma cena (ex.: trocar de sala).
 
 ---
 

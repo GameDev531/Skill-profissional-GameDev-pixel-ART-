@@ -241,19 +241,60 @@ grid, a heurística é a distância estimada até o alvo:
 - **Manhattan** (sem diagonal), **Chebyshev/Octile** (com diagonal),
   **Euclidean**.
 
-### Godot — AStarGrid2D
-Godot tem A* de grid embutido:
+### Godot — AStarGrid2D (exemplo real com TileMapLayer)
+Integração completa A* + TileMap, incluindo consulta de walkability e desenho:
 ```gdscript
-var astar := AStarGrid2D.new()
-astar.region = Rect2i(0, 0, map_w, map_h)
-astar.cell_size = Vector2(16, 16)
-astar.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_NEVER
-astar.update()
-# marque sólidos a partir do TileMap:
-for cell in tilemap.get_used_cells_by_id(...):
-    astar.set_point_solid(cell, true)
-var path := astar.get_point_path(start_cell, target_cell)  # Array[Vector2]
+extends TileMapLayer
+
+const CELL_SIZE = Vector2i(64, 64)
+
+var _astar := AStarGrid2D.new()
+var _start_point := Vector2i()
+var _end_point := Vector2i()
+var _path := PackedVector2Array()
+
+func _ready() -> void:
+    _astar.region = Rect2i(0, 0, 18, 10)
+    _astar.cell_size = CELL_SIZE
+    _astar.offset = CELL_SIZE * 0.5
+    _astar.default_compute_heuristic = AStarGrid2D.HEURISTIC_MANHATTAN
+    _astar.default_estimate_heuristic = AStarGrid2D.HEURISTIC_MANHATTAN
+    _astar.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_NEVER
+    _astar.update()
+    # Marca tiles usadas como sólidas (paredes/obstáculos)
+    for pos in get_used_cells():
+        _astar.set_point_solid(pos)
+        # Filtre por atlas coords ou custom data:
+        # if get_cell_tile_data(pos).get_custom_data("type") == "obstacle":
+
+func is_point_walkable(local_position: Vector2) -> bool:
+    var map_position := local_to_map(local_position)
+    if _astar.is_in_boundsv(map_position):
+        return not _astar.is_point_solid(map_position)
+    return false
+
+func find_path(local_start: Vector2i, local_end: Vector2i) -> PackedVector2Array:
+    _start_point = local_to_map(local_start)
+    _end_point = local_to_map(local_end)
+    _path = _astar.get_point_path(_start_point, _end_point)
+    queue_redraw()
+    return _path.duplicate()
+
+func _draw() -> void:
+    if _path.is_empty(): return
+    var last := _path[0]
+    for i in range(1, _path.size()):
+        draw_line(last, _path[i], Color.WHITE * Color(1,1,1,0.5), 3.0, true)
+        draw_circle(_path[i], 6.0, Color.WHITE * Color(1,1,1,0.5))
+        last = _path[i]
 ```
+
+**Configurações comuns de AStarGrid2D:**
+- `diagonal_mode`: `DIAGONAL_MODE_NEVER` (4-way), `DIAGONAL_MODE_ONLY_IF_NO_OBSTACLES`, `DIAGONAL_MODE_ALWAYS`
+- `jumping_enabled = true`: permite pular sobre obstáculos isolados
+- `region` ou `size`: define a área do grid (use `tilemap.get_used_rect()`)
+- Heurísticas: `HEURISTIC_MANHATTAN` (4-dir), `HEURISTIC_OCTILE` (8-dir), `HEURISTIC_EUCLIDEAN`
+
 (Há também `AStar2D`/`AStar3D` para grafos arbitrários, e nós utilitários de
 A* em grid 2D que encapsulam isso com obstáculos dinâmicos.)
 
